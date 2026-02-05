@@ -1,0 +1,25 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environments
+venv/
+env/
+.env
+.venv
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Streamlit
+.streamlit/
+
+# Project Specific
+queue_state.pkl
+queue_state.pkl.bak
+translated_*
+translations.zip
+
+# OS files
+.DS_Store
+Thumbs.db

@@ -1,0 +1,64 @@
+%% OfficeTranslator Architecture
+%% Visualizes the component relationships and data flow
+
+flowchart TB
+    subgraph UI["Streamlit UI (app.py)"]
+        Upload[File Upload]
+        Settings[Settings Sidebar]
+        Progress[Progress Display]
+        Download[Download Button]
+        Logs[Debug Console]
+    end
+
+    subgraph Services["Core Services"]
+        TS[TranslationService]
+        LLM[LLMClient]
+        Vision[VisionEngine]
+    end
+
+    subgraph Processors["File Processors"]
+        Factory[ProcessorFactory]
+        Base[BaseFileProcessor]
+        DOCX[DocxProcessor]
+        PPTX[PptxProcessor]
+        XLSX[XlsxProcessor]
+        PDF[PdfProcessor]
+    end
+
+    subgraph External["External Services"]
+        LLMServer["LLM Backend\n(LM Studio / Ollama)"]
+        OCR["EasyOCR\n(Local)"]
+    end
+
+    %% UI Flow
+    Upload --> Factory
+    Settings --> TS
+    TS --> Progress
+    Progress --> Download
+
+    %% Service connections
+    TS --> LLM
+    TS --> Vision
+    LLM --> LLMServer
+    Vision --> OCR
+
+    %% Factory pattern
+    Factory --> Base
+    Base --> DOCX
+    Base --> PPTX
+    Base --> XLSX
+    Base --> PDF
+
+    %% Data flow
+    DOCX & PPTX & XLSX & PDF --> TS
+
+    %% Styling
+    classDef ui fill:#e1f5fe,stroke:#01579b
+    classDef service fill:#fff3e0,stroke:#e65100
+    classDef processor fill:#e8f5e9,stroke:#2e7d32
+    classDef external fill:#fce4ec,stroke:#c2185b
+
+    class Upload,Settings,Progress,Download,Logs ui
+    class TS,LLM,Vision service
+    class Factory,Base,DOCX,PPTX,XLSX,PDF processor
+    class LLMServer,OCR external
