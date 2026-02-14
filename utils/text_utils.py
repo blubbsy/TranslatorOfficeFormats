@@ -2,9 +2,56 @@
 Text utilities for fitting text to bounding boxes and color calculations.
 """
 
-from typing import Tuple
+import math
+from typing import Tuple, List, Optional
 
 from PIL import Image, ImageDraw, ImageFont
+
+
+def get_font_for_language(language: str, font_size: int) -> ImageFont.FreeTypeFont:
+    """
+    Get a suitable font for the given language.
+    """
+    lang_lower = language.lower()
+    
+    # Common font paths for different OS
+    font_candidates = []
+    
+    if "chinese" in lang_lower or "zh" in lang_lower:
+        if "traditional" in lang_lower or "hant" in lang_lower:
+            font_candidates = [
+                "msjh.ttc",      # Windows: Microsoft JhengHei
+                "mingliu.ttc",   # Windows: MingLiU
+                "DroidSansFallback.ttf"
+            ]
+        else:
+            font_candidates = [
+                "msyh.ttc",      # Windows: Microsoft YaHei
+                "simsun.ttc",    # Windows: SimSun
+                "simhei.ttf",    # Windows: SimHei
+                "wqy-microhei.ttc", # Linux: WenQuanYi Micro Hei
+                "DroidSansFallback.ttf" # Common fallback
+            ]
+    elif "japanese" in lang_lower or "ja" in lang_lower:
+        font_candidates = ["msgothic.ttc", "meiryo.ttc", "msmincho.ttc", "DroidSansFallback.ttf"]
+    elif "korean" in lang_lower or "ko" in lang_lower:
+        font_candidates = ["malgun.ttf", "batang.ttc", "gulim.ttc", "DroidSansFallback.ttf"]
+    
+    # Try candidates
+    for font_name in font_candidates:
+        try:
+            return ImageFont.truetype(font_name, font_size)
+        except OSError:
+            continue
+            
+    # Default fallbacks
+    try:
+        return ImageFont.truetype("arial.ttf", font_size)
+    except OSError:
+        try:
+            return ImageFont.truetype("DejaVuSans.ttf", font_size)
+        except OSError:
+            return ImageFont.load_default()
 
 
 def calculate_luminance(rgb: Tuple[int, int, int]) -> float:
@@ -36,37 +83,62 @@ def get_contrasting_colors(
 ) -> Tuple[Tuple[int, int, int, int], Tuple[int, int, int]]:
     """
     Determine optimal background and text colors based on image region.
-    
-    Args:
-        image: PIL Image to analyze
-        bbox: Bounding box (x1, y1, x2, y2) of the region
-        
-    Returns:
-        Tuple of (background_rgba, text_rgb) for maximum contrast
     """
     x1, y1, x2, y2 = bbox
     
-    # Crop the region and calculate average color
-    region = image.crop(bbox)
-    region_small = region.resize((1, 1), Image.Resampling.LANCZOS)
-    avg_color = region_small.getpixel((0, 0))
+    # Ensure bbox is within image bounds
+    x1 = max(0, x1)
+    y1 = max(0, y1)
+    x2 = min(image.width, x2)
+    y2 = min(image.height, y2)
     
-    if len(avg_color) == 4:
-        avg_color = avg_color[:3]  # Remove alpha if present
+    if x2 <= x1 or y2 <= y1:
+        return (255, 255, 255, 255), (0, 0, 0)
+
+    # Crop the region
+    region = image.crop((x1, y1, x2, y2)).convert("RGB")
     
-    luminance = calculate_luminance(avg_color)
+    # 1. Detect Background Color (sample corners and edges)
+    pixels = region.load()
+    w, h = region.size
+    samples = []
+    # Corners
+    samples.append(pixels[0, 0])
+    samples.append(pixels[w-1, 0])
+    samples.append(pixels[0, h-1])
+    samples.append(pixels[w-1, h-1])
+    # Edge midpoints
+    samples.append(pixels[w//2, 0])
+    samples.append(pixels[w//2, h-1])
+    samples.append(pixels[0, h//2])
+    samples.append(pixels[w-1, h//2])
     
-    # Choose contrasting colors
-    if luminance > 0.5:
-        # Light background -> dark overlay with white text
-        bg_color = (0, 0, 0, 180)  # More opaque black
-        text_color = (255, 255, 255)
-    else:
-        # Dark background -> light overlay with dark text
-        bg_color = (255, 255, 255, 200)  # More opaque white
-        text_color = (0, 0, 0)
+    # Calculate average background from samples
+    avg_bg = tuple(sum(s[i] for s in samples) // len(samples) for i in range(3))
     
-    return bg_color, text_color
+    # 2. Detect Original Text Color
+    # We look for the color that is MOST different from the background
+    small_region = region.resize((20, 20), Image.Resampling.NEAREST)
+    colors = small_region.getcolors(small_region.size[0] * small_region.size[1])
+    
+    text_color = (0, 0, 0) # Default
+    max_diff = -1
+    
+    if colors:
+        for count, color in colors:
+            # Simple Euclidean distance in RGB
+            diff = sum((color[i] - avg_bg[i])**2 for i in range(3))**0.5
+            if diff > max_diff:
+                max_diff = diff
+                text_color = color
+                
+    # If the detected text color is too similar to background, fallback to contrast
+    if max_diff < 40:
+        lum = calculate_luminance(avg_bg)
+        text_color = (255, 255, 255) if lum < 0.5 else (0, 0, 0)
+    
+    # Return background with full opacity for a solid cover
+    return (*avg_bg, 255), text_color
 
 
 def fit_text_to_box(
@@ -75,42 +147,15 @@ def fit_text_to_box(
     box_height: int,
     max_font_size: int = 24,
     min_font_size: int = 8,
-    font_path: str = None
+    language: str = "English"
 ) -> Tuple[ImageFont.FreeTypeFont, int]:
     """
     Find the largest font size that fits text within a bounding box.
-    
-    Args:
-        text: Text to fit
-        box_width: Maximum width in pixels
-        box_height: Maximum height in pixels
-        max_font_size: Starting font size
-        min_font_size: Minimum acceptable font size
-        font_path: Path to TTF font file (uses default if None)
-        
-    Returns:
-        Tuple of (font object, actual font size used)
     """
     font_size = max_font_size
     
     while font_size >= min_font_size:
-        try:
-            if font_path:
-                font = ImageFont.truetype(font_path, font_size)
-            else:
-                # Try to use a system font, fall back to default
-                try:
-                    font = ImageFont.truetype("arial.ttf", font_size)
-                except OSError:
-                    try:
-                        font = ImageFont.truetype("DejaVuSans.ttf", font_size)
-                    except OSError:
-                        font = ImageFont.load_default()
-                        # Default font doesn't support size, return immediately
-                        return font, 10
-        except OSError:
-            font = ImageFont.load_default()
-            return font, 10
+        font = get_font_for_language(language, font_size)
         
         # Calculate text size
         dummy_img = Image.new("RGB", (1, 1))
@@ -124,16 +169,48 @@ def fit_text_to_box(
         
         font_size -= 1
     
-    # Return minimum size font
-    try:
-        if font_path:
-            font = ImageFont.truetype(font_path, min_font_size)
-        else:
-            font = ImageFont.truetype("arial.ttf", min_font_size)
-    except OSError:
-        font = ImageFont.load_default()
+    return get_font_for_language(language, min_font_size), min_font_size
+
+
+def draw_rotated_text(
+    image: Image.Image,
+    text: str,
+    center: Tuple[int, int],
+    angle: float,
+    font: ImageFont.FreeTypeFont,
+    fill: Tuple[int, int, int],
+    bg_fill: Optional[Tuple[int, int, int, int]] = None,
+    original_bbox: Optional[Tuple[int, int, int, int]] = None
+):
+    """
+    Draw text rotated around its center. 
+    If original_bbox is provided, it clears that area first with bg_fill.
+    """
+    draw = ImageDraw.Draw(image)
     
-    return font, min_font_size
+    # 1. Clear original area if requested
+    if original_bbox and bg_fill:
+        draw.rectangle(original_bbox, fill=bg_fill)
+    
+    # 2. Prepare rotated text
+    dummy = Image.new("RGBA", (1, 1))
+    dummy_draw = ImageDraw.Draw(dummy)
+    bbox = dummy_draw.textbbox((0, 0), text, font=font)
+    w, h = bbox[2] - bbox[0], bbox[3] - bbox[1]
+    
+    # Add padding
+    pad = 4
+    txt_img = Image.new("RGBA", (w + pad*2, h + pad*2), (0, 0, 0, 0))
+    txt_draw = ImageDraw.Draw(txt_img)
+    txt_draw.text((pad, pad), text, font=font, fill=fill)
+    
+    # Rotate
+    rotated = txt_img.rotate(angle, expand=True, resample=Image.Resampling.BICUBIC)
+    
+    # Paste
+    rw, rh = rotated.size
+    top_left = (int(center[0] - rw/2), int(center[1] - rh/2))
+    image.alpha_composite(rotated, top_left)
 
 
 def wrap_text(
@@ -175,6 +252,70 @@ def wrap_text(
         lines.append(" ".join(current_line))
     
     return lines if lines else [text]
+
+
+def split_text_smart(text: str, max_chars: int) -> list[str]:
+    """
+    Split text into chunks that respect a maximum character limit.
+    """
+    if len(text) <= max_chars:
+        return [text]
+    
+    chunks = []
+    
+    # Try splitting by paragraph
+    paragraphs = text.split("\n\n")
+    if len(paragraphs) > 1:
+        current_chunk = []
+        current_len = 0
+        
+        for p in paragraphs:
+            if len(p) > max_chars:
+                if current_chunk:
+                    chunks.append("\n\n".join(current_chunk))
+                    current_chunk = []
+                    current_len = 0
+                chunks.extend(split_text_smart(p, max_chars))
+            elif current_len + len(p) + 2 > max_chars:
+                chunks.append("\n\n".join(current_chunk))
+                current_chunk = [p]
+                current_len = len(p)
+            else:
+                current_chunk.append(p)
+                current_len += len(p) + 2
+                
+        if current_chunk:
+            chunks.append("\n\n".join(current_chunk))
+        return chunks
+
+    # Try splitting by line
+    lines = text.split("\n")
+    if len(lines) > 1:
+        current_chunk = []
+        current_len = 0
+        for l in lines:
+            if len(l) > max_chars:
+                if current_chunk:
+                    chunks.append("\n".join(current_chunk))
+                    current_chunk = []
+                    current_len = 0
+                chunks.extend(split_text_smart(l, max_chars))
+            elif current_len + len(l) + 1 > max_chars:
+                chunks.append("\n".join(current_chunk))
+                current_chunk = [l]
+                current_len = len(l)
+            else:
+                current_chunk.append(l)
+                current_len += len(l) + 1
+        if current_chunk:
+            chunks.append("\n".join(current_chunk))
+        return chunks
+
+    # Hard split by characters
+    for i in range(0, len(text), max_chars):
+        chunks.append(text[i : i + max_chars])
+    
+    return chunks
 
 
 def format_size(size_bytes: int) -> str:

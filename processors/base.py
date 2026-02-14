@@ -40,9 +40,6 @@ class ContentChunk:
 class BaseFileProcessor(ABC):
     """
     Abstract base class for document processors.
-    
-    All file format plugins must inherit from this class and implement
-    the required methods.
     """
     
     # File extensions this processor handles
@@ -52,6 +49,20 @@ class BaseFileProcessor(ABC):
         self._document: Any = None
         self._file_path: Optional[Path] = None
         self._chunks_cache: dict[str, ContentChunk] = {}
+        self.target_language: str = "English"
+
+    def get_special_font(self) -> Optional[str]:
+        """Get a suitable font name for the target language."""
+        lang = self.target_language.lower()
+        if "chinese" in lang or "zh" in lang:
+            if "traditional" in lang or "hant" in lang:
+                return "Microsoft JhengHei"
+            return "Microsoft YaHei"
+        if "japanese" in lang or "ja" in lang:
+            return "Meiryo"
+        if "korean" in lang or "ko" in lang:
+            return "Malgun Gothic"
+        return None
     
     @property
     def file_path(self) -> Optional[Path]:

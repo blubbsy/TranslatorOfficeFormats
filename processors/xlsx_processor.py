@@ -148,6 +148,17 @@ class XlsxProcessor(BaseFileProcessor):
         
         cell.value = str(translated_content)
         
+        # Apply language-specific font if needed
+        special_font = self.get_special_font()
+        if special_font:
+            from openpyxl.styles import Font
+            if cell.font:
+                new_font = copy(cell.font)
+                new_font.name = special_font
+                cell.font = new_font
+            else:
+                cell.font = Font(name=special_font)
+
         # Ensure text wraps to avoid layout issues with longer translations
         # We try to preserve existing alignment properties
         if cell.alignment:

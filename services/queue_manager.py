@@ -24,7 +24,7 @@ class Job:
     target_lang: str
     settings: Dict[str, Any]
     owner_session_id: str # To identify which user owns this job
-    status: str = "pending" # pending, processing, done, error
+    status: str = "pending" # pending, processing, done, error, paused
     progress: float = 0.0
     status_msg: str = "Queued"
     result_data: Optional[bytes] = None
@@ -32,6 +32,8 @@ class Job:
     created_at: float = field(default_factory=time.time)
     error: Optional[str] = None
     cancel_requested: bool = False
+    pause_requested: bool = False
+    intermediate_results: Dict[str, Any] = field(default_factory=dict)
 
 class GlobalQueueManager:
     """Thread-safe singleton queue for managing translation jobs."""
@@ -167,6 +169,37 @@ class GlobalQueueManager:
                     job.status_msg = "Cancelled"
             
             self._save_state()
+
+    def pause_job(self, job_id: str):
+        """Request a job to pause."""
+        with self.lock:
+            if job_id in self.jobs:
+                job = self.jobs[job_id]
+                if job.status == "processing":
+                    job.pause_requested = True
+                    job.status_msg = "Pausing..."
+                elif job.status == "pending":
+                    # If it's still in queue, just mark as paused and remove from queue
+                    if job_id in self.queue:
+                        self.queue.remove(job_id)
+                    job.status = "paused"
+                    job.status_msg = "Paused"
+                self._save_state()
+
+    def resume_job(self, job_id: str):
+        """Resume a paused job."""
+        with self.lock:
+            if job_id in self.jobs:
+                job = self.jobs[job_id]
+                if job.status in ["paused", "error", "cancelled"]:
+                    job.status = "pending"
+                    job.pause_requested = False
+                    job.cancel_requested = False
+                    job.error = None
+                    if job_id not in self.queue:
+                        self.queue.append(job_id)
+                    job.status_msg = "Resumed"
+                self._save_state()
 
     def clear_user_jobs(self, session_id: str):
         """Clear all completed/cancelled jobs for a user."""

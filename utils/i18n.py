@@ -46,6 +46,8 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "image_method": "Image Translation Method",
         "method_ocr": "Standard (OCR)",
         "method_vlm": "Experimental (VLM)",
+        "btn_pause": "Pause",
+        "btn_resume": "Resume",
     },
     "de": {
         "title": "OfficeTranslator",
@@ -82,6 +84,8 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "image_method": "Bildübersetzungsmethode",
         "method_ocr": "Standard (OCR)",
         "method_vlm": "Experimentell (VLM)",
+        "btn_pause": "Pause",
+        "btn_resume": "Fortsetzen",
     },
 }
 

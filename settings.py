@@ -31,12 +31,12 @@ class Settings(BaseSettings):
         description="API key for LLM service"
     )
     llm_model: str = Field(
-        default="llama-3-8b-instruct",
+        default="openai/gpt-oss-20b",
         description="Model identifier to use for translation"
     )
     llm_context_window: int = Field(
         default=4096,
-        description="Max context window size (tokens) of the LLM"
+        description="Detected or manual context window size in tokens"
     )
     
     # App Behavior
@@ -44,17 +44,17 @@ class Settings(BaseSettings):
         default="English",
         description="Target language for translations"
     )
-    ocr_source_languages: str = Field(
-        default="en,de,zh-cn",
-        description="Comma-separated list of source languages for OCR (e.g., en,de,fr,zh-cn)"
-    )
     translate_images: bool = Field(
         default=True,
         description="Whether to OCR and translate text in images"
     )
     image_translation_method: str = Field(
         default="ocr",
-        description="Method for image translation: 'ocr' or 'vlm'"
+        description="Method for image translation: 'ocr' (Tesseract + LLM) or 'vlm' (Vision-Language Model)"
+    )
+    ocr_source_languages: str = Field(
+        default="en,de",
+        description="Comma-separated list of languages for OCR (e.g., 'en,de,fr')"
     )
     
     # Advanced Features

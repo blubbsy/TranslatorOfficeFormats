@@ -77,6 +77,30 @@ def init_session():
     if "llm_message" not in st.session_state:
         st.session_state.llm_message = t("status_connecting")
 
+@st.fragment(run_every=5)
+def render_connection_status():
+    """Render connection status in sidebar."""
+    if st.session_state.llm_status == "checking":
+        st.info(f"🔄 {t('status_connecting')}")
+        if "check_thread_started" not in st.session_state:
+            st.session_state.check_thread_started = True
+            thread = threading.Thread(target=check_llm_connection_async)
+            add_script_run_ctx(thread)
+            thread.daemon = True
+            thread.start()
+    elif st.session_state.llm_status == "ready":
+        st.success(st.session_state.llm_message)
+    else:
+        col_err, col_retry = st.columns([4, 1])
+        with col_err:
+            st.error(st.session_state.llm_message)
+        with col_retry:
+            if st.button("🔄", help=t("btn_retry")):
+                st.session_state.llm_status = "checking"
+                if "check_thread_started" in st.session_state:
+                    del st.session_state.check_thread_started
+                st.rerun()
+
 def render_sidebar():
     """Render the settings sidebar."""
     with st.sidebar:
@@ -106,23 +130,8 @@ def render_sidebar():
             
         st.divider()
         
-        # Connection status - Non-blocking UI update
-        status_container = st.empty()
-        
-        if st.session_state.llm_status == "checking":
-            status_container.info(f"🔄 {t('status_connecting')}")
-        elif st.session_state.llm_status == "ready":
-            status_container.success(st.session_state.llm_message)
-        else:
-            col_err, col_retry = st.columns([4, 1])
-            with col_err:
-                status_container.error(st.session_state.llm_message)
-            with col_retry:
-                if st.button("🔄", help=t("btn_retry")):
-                    st.session_state.llm_status = "checking"
-                    if "check_thread_started" in st.session_state:
-                        del st.session_state.check_thread_started
-                    st.rerun()
+        # Connection status fragment
+        render_connection_status()
 
         st.title(f"⚙️ {t('settings_title')}")
         
@@ -215,7 +224,8 @@ def render_queue_fragment(queue_manager: GlobalQueueManager, session_id: str):
                 zip_buffer = io.BytesIO()
                 with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
                     for job in completed_jobs:
-                        zf.writestr(job.result_name, job.result_data)
+                        if job.result_name and job.result_data:
+                            zf.writestr(job.result_name, job.result_data)
                 
                 st.download_button(
                     f"📦 {t('btn_download_zip')}",
@@ -287,8 +297,16 @@ def render_queue_fragment(queue_manager: GlobalQueueManager, session_id: str):
                             help=t('btn_download')
                         )
                 
-                # Reorder / Cancel
-                if job.status == "pending":
+                # Pause / Resume / Cancel
+                if job.status == "processing":
+                    with a2:
+                        if st.button("⏸️", key=f"pause_{job.id}", help=t('btn_pause')):
+                            queue_manager.pause_job(job.id)
+                    with a4:
+                        if st.button("❌", key=f"cancel_{job.id}", help="Cancel"):
+                            queue_manager.cancel_job(job.id)
+                            st.rerun()
+                elif job.status == "pending":
                     with a1:
                         if st.button("⬆️", key=f"up_{job.id}", disabled=(idx == 0), help="Move Up"):
                             queue_manager.reorder_job(job.id, "up")
@@ -298,14 +316,21 @@ def render_queue_fragment(queue_manager: GlobalQueueManager, session_id: str):
                             queue_manager.reorder_job(job.id, "down")
                             st.rerun()
                     with a3:
+                        if st.button("⏸️", key=f"pause_pend_{job.id}", help=t('btn_pause')):
+                            queue_manager.pause_job(job.id)
+                    with a4:
                         if st.button("🗑️", key=f"cl_{job.id}", help="Cancel"):
                             queue_manager.cancel_job(job.id)
                             st.rerun()
-                elif job.status == "error":
+                elif job.status in ["paused", "error", "cancelled"]:
                     with a1:
-                         if st.button("🔄", key=f"retry_{job.id}", help=t("btn_retry")):
-                             queue_manager.cancel_job(job.id)
+                         if st.button("▶️", key=f"resume_{job.id}", help=t("btn_resume")):
+                             queue_manager.resume_job(job.id)
                              st.rerun()
+                    with a4:
+                        if st.button("🗑️", key=f"del_{job.id}", help="Remove"):
+                            queue_manager.cancel_job(job.id)
+                            st.rerun()
 
 def get_languages() -> List[str]:
     """Get list of supported languages."""
@@ -394,18 +419,6 @@ def main():
     queue_manager = get_queue_manager()
     user_settings = render_sidebar()
     render_main_interface(user_settings, queue_manager)
-    
-    # --- CONNECTION POLLING LOGIC ---
-    if st.session_state.llm_status == "checking":
-        if "check_thread_started" not in st.session_state:
-            st.session_state.check_thread_started = True
-            thread = threading.Thread(target=check_llm_connection_async)
-            add_script_run_ctx(thread)
-            thread.daemon = True
-            thread.start()
-        
-        time.sleep(1)
-        st.rerun()
 
 if __name__ == "__main__":
     main()

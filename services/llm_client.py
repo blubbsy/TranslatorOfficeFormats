@@ -28,10 +28,10 @@ class LLMClient:
     
     def __init__(
         self,
-        base_url: str = None,
-        api_key: str = None,
-        model: str = None,
-        max_retries: int = None,
+        base_url: Optional[str] = None,
+        api_key: Optional[str] = None,
+        model: Optional[str] = None,
+        max_retries: Optional[int] = None,
     ):
         """
         Initialize LLM client.
@@ -42,17 +42,18 @@ class LLMClient:
             model: Model identifier (defaults to settings)
             max_retries: Max retry attempts (defaults to settings)
         """
-        self.base_url = base_url or settings.llm_base_url
-        self.api_key = api_key or settings.llm_api_key
-        self.model = model or settings.llm_model
-        self.max_retries = max_retries or settings.max_retries
+        self.base_url: str = base_url or settings.llm_base_url
+        self.api_key: str = api_key or settings.llm_api_key
+        self.model: str = model or settings.llm_model
+        self.max_retries: int = max_retries or settings.max_retries
+        self.context_window: int = settings.llm_context_window
         
         self.client = OpenAI(
             base_url=self.base_url,
             api_key=self.api_key,
         )
         
-        self.connected_model_id = None
+        self.connected_model_id: Optional[str] = None
         
         # Load glossary if configured
         self.glossary: dict[str, str] = {}
@@ -100,8 +101,8 @@ class LLMClient:
                     if key in model_data and model_data[key]:
                         try:
                             new_window = int(model_data[key])
-                            if new_window > 0 and new_window != settings.llm_context_window:
-                                settings.llm_context_window = new_window
+                            if new_window > 0 and new_window != self.context_window:
+                                self.context_window = new_window
                                 logger.info(f"Auto-detected context window: {new_window}")
                                 break
                         except (ValueError, TypeError):
@@ -122,7 +123,7 @@ class LLMClient:
     def translate(
         self,
         text: str,
-        target_language: str = None,
+        target_language: Optional[str] = None,
         context: Optional[str] = None,
         preserve_formatting: bool = False,
     ) -> str:
@@ -155,6 +156,11 @@ class LLMClient:
         
         logger.debug(f"Translating: {text[:50]}...")
         
+        # Estimate input tokens (very rough: 3 chars per token)
+        # Plus some overhead for system prompt and context
+        estimated_input_tokens = (len(text) // 3) + 250 
+        available_for_output = max(100, self.context_window - estimated_input_tokens)
+        
         try:
             response = self.client.chat.completions.create(
                 model=self.model,
@@ -163,7 +169,7 @@ class LLMClient:
                     {"role": "user", "content": user_prompt},
                 ],
                 temperature=0.3,  # Lower temperature for more consistent translations
-                max_tokens=min(settings.llm_context_window // 2, len(text) * 3),  # Rough estimate for expansion, capped
+                max_tokens=min(available_for_output, len(text) * 2),  # Expansion is rarely > 2x
             )
             
             translated = response.choices[0].message.content.strip()
@@ -214,8 +220,8 @@ class LLMClient:
     def batch_translate(
         self,
         texts: list[str],
-        target_language: str = None,
-        context_window: int = None,
+        target_language: Optional[str] = None,
+        context_window: Optional[int] = None,
     ) -> list[str]:
         """
         Translate multiple texts with context window.
@@ -257,7 +263,7 @@ class LLMClient:
     def translate_image(
         self,
         base64_image: str,
-        target_language: str = None,
+        target_language: Optional[str] = None,
     ) -> str:
         """
         Analyze and translate text in an image using a VLM.
@@ -270,7 +276,11 @@ class LLMClient:
             f"Detect all text in the image and translate it to {target_lang}. "
             f"Preserve proper nouns, technical terms, and named entities in their original language. "
             f"Return a JSON object with a single key 'regions', which is a list of objects. "
-            f"Each object must have: 'bbox' [x1, y1, x2, y2] (integers) and 'text' (the translated string). "
+            f"Each object must have: "
+            f"'bbox' [x1, y1, x2, y2] (integers), "
+            f"'text' (the translated string), "
+            f"'color' [r, g, b] (original text color, optional), "
+            f"'background' [r, g, b] (original background color, optional). "
             f"Do not include the original text. Return ONLY valid JSON."
         )
 

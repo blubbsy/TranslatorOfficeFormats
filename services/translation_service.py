@@ -8,6 +8,7 @@ from typing import Callable, Generator, Optional
 from .llm_client import LLMClient
 from .vision_engine import VisionEngine, TextRegion
 from settings import settings
+from utils.text_utils import split_text_smart
 
 logger = logging.getLogger("OfficeTranslator.TranslationService")
 
@@ -20,8 +21,8 @@ class TranslationService:
     
     def __init__(
         self,
-        llm_client: LLMClient = None,
-        vision_engine: VisionEngine = None,
+        llm_client: Optional[LLMClient] = None,
+        vision_engine: Optional[VisionEngine] = None,
     ):
         """
         Initialize translation service.
@@ -30,8 +31,8 @@ class TranslationService:
             llm_client: LLM client instance (creates new if None)
             vision_engine: Vision engine instance (creates new if None)
         """
-        self._llm_client = llm_client
-        self._vision_engine = vision_engine
+        self._llm_client: Optional[LLMClient] = llm_client
+        self._vision_engine: Optional[VisionEngine] = vision_engine
         self._context_buffer: list[str] = []
         
         self.on_progress: Optional[Callable[[int, int, str], None]] = None
@@ -60,7 +61,7 @@ class TranslationService:
         try:
             if self.llm_client.check_connection():
                 model = self.llm_client.connected_model_id or settings.llm_model
-                ctx = settings.llm_context_window
+                ctx = self.llm_client.context_window
                 return True, f"🟢 Ready: {model} ({ctx})"
             else:
                 return False, "🔴 LLM Disconnected"
@@ -71,10 +72,10 @@ class TranslationService:
         self,
         text: str,
         use_context: bool = True,
-        target_language: str = None,
+        target_language: Optional[str] = None,
     ) -> str:
         """
-        Translate a single text string.
+        Translate a single text string. Handles large text by splitting into chunks.
         
         Args:
             text: Text to translate
@@ -84,13 +85,33 @@ class TranslationService:
         Returns:
             Translated text
         """
+        if not text or not text.strip():
+            return text
+            
+        # Determine safe chunk size (approx 40% of context window in tokens -> chars)
+        # Using 3 chars per token as a very conservative estimate for various languages
+        safe_input_limit_chars = int((self.llm_client.context_window * 0.4) * 3)
+        
+        if len(text) > safe_input_limit_chars:
+            logger.info(f"Text too large ({len(text)} chars), splitting into chunks...")
+            chunks = split_text_smart(text, safe_input_limit_chars)
+            translated_chunks = []
+            
+            for i, chunk in enumerate(chunks):
+                logger.debug(f"Translating chunk {i+1}/{len(chunks)} ({len(chunk)} chars)")
+                translated_chunks.append(
+                    self.translate_text(chunk, use_context=use_context, target_language=target_language)
+                )
+            
+            return "\n\n".join(translated_chunks)
+
         context = None
         if use_context and self._context_buffer:
             context_str = " ".join(self._context_buffer[-settings.context_window_size:])
             
             # Truncate context based on configured window size
-            # Assume ~4 chars per token, use 20% of window for history context
-            max_chars = int((settings.llm_context_window * 4) * 0.2)
+            # Use 20% of window for history context
+            max_chars = int((self.llm_client.context_window * 0.2) * 3)
             
             if len(context_str) > max_chars:
                 context_str = "..." + context_str[-max_chars:]
@@ -115,7 +136,7 @@ class TranslationService:
     def translate_texts(
         self,
         texts: list[str],
-        progress_callback: Callable[[int, int], None] = None,
+        progress_callback: Optional[Callable[[int, int], None]] = None,
     ) -> Generator[tuple[int, str, str], None, None]:
         """
         Translate multiple texts with progress updates.
@@ -145,7 +166,8 @@ class TranslationService:
         self,
         image_data: bytes,
         smart_colors: bool = True,
-        method: str = None,
+        method: Optional[str] = None,
+        target_language: Optional[str] = None,
     ) -> tuple[bytes, list[TextRegion]]:
         """
         Detect and translate text in an image.
@@ -154,14 +176,11 @@ class TranslationService:
             image_data: Image bytes
             smart_colors: Use adaptive background colors
             method: Translation method ('ocr' or 'vlm'). Defaults to settings.
+            target_language: Target language
             
         Returns:
             Tuple of (processed image bytes, text regions)
         """
-        if not settings.translate_images:
-            logger.debug("Image translation disabled, returning original")
-            return image_data, []
-        
         current_method = method or settings.image_translation_method
         
         if current_method == "vlm":
@@ -169,13 +188,15 @@ class TranslationService:
             return self.vision_engine.process_image_vlm(
                 image_data,
                 translate_image_func=lambda b64: self.llm_client.translate_image(b64),
-                smart_colors=smart_colors
+                smart_colors=smart_colors,
+                target_language=target_language
             )
         else:
             return self.vision_engine.process_image(
                 image_data,
-                translate_func=lambda t: self.translate_text(t, use_context=False),
+                translate_func=lambda t: self.translate_text(t, use_context=False, target_language=target_language),
                 smart_colors=smart_colors,
+                target_language=target_language
             )
     
     def reset_context(self) -> None:

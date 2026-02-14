@@ -149,7 +149,12 @@ class DocxProcessor(BaseFileProcessor):
         else:
             # Simple replacement - clears formatting but is reliable
             paragraph.clear()
-            paragraph.add_run(str(translated_content))
+            run = paragraph.add_run(str(translated_content))
+            
+            # Apply language-specific font if needed
+            special_font = self.get_special_font()
+            if special_font:
+                run.font.name = special_font
         
         logger.debug(f"Applied translation to {chunk_id}")
     
@@ -171,17 +176,15 @@ class DocxProcessor(BaseFileProcessor):
     def _apply_with_formatting(self, paragraph: Paragraph, translated_text: str) -> None:
         """
         Apply translation while attempting to preserve formatting.
-        
-        This is a simplified implementation - full formatting preservation
-        would require parsing pseudo-tags from the translation.
         """
-        # For now, preserve the first run's formatting
+        special_font = self.get_special_font()
+
         if paragraph.runs:
             first_run = paragraph.runs[0]
             bold = first_run.bold
             italic = first_run.italic
             underline = first_run.underline
-            font_name = first_run.font.name
+            font_name = special_font or first_run.font.name
             font_size = first_run.font.size
             
             paragraph.clear()
@@ -195,7 +198,9 @@ class DocxProcessor(BaseFileProcessor):
                 new_run.font.size = font_size
         else:
             paragraph.clear()
-            paragraph.add_run(translated_text)
+            run = paragraph.add_run(translated_text)
+            if special_font:
+                run.font.name = special_font
     
     def _extract_inline_image(self, blip_element) -> bytes | None:
         """Extract image bytes from an inline blip element."""

@@ -201,14 +201,24 @@ class PptxProcessor(BaseFileProcessor):
         return False
     
     def _simple_replace(self, paragraph, text: str) -> None:
-        """Replace paragraph text, preserving first run's basic formatting."""
+        """Replace paragraph text, preserving first run's formatting including color."""
+        special_font = self.get_special_font()
+
         if paragraph.runs:
             # Keep font settings from first run
             first_run = paragraph.runs[0]
-            font_name = first_run.font.name
+            font_name = special_font or first_run.font.name
             font_size = first_run.font.size
             font_bold = first_run.font.bold
             font_italic = first_run.font.italic
+            
+            # Preserve color if possible
+            color_rgb = None
+            try:
+                if first_run.font.color.type is not None:
+                    color_rgb = first_run.font.color.rgb if hasattr(first_run.font.color, "rgb") else None
+            except:
+                pass
             
             # Clear all runs
             for run in paragraph.runs:
@@ -221,8 +231,14 @@ class PptxProcessor(BaseFileProcessor):
                 paragraph.runs[0].font.size = font_size
             paragraph.runs[0].font.bold = font_bold
             paragraph.runs[0].font.italic = font_italic
+            
+            if color_rgb:
+                paragraph.runs[0].font.color.rgb = color_rgb
         else:
             paragraph.text = text
+            if special_font:
+                for run in paragraph.runs:
+                    run.font.name = special_font
     
     def _apply_with_formatting(self, paragraph, text: str) -> None:
         """Apply translation while attempting to preserve formatting."""
@@ -232,21 +248,18 @@ class PptxProcessor(BaseFileProcessor):
     
     def _replace_picture(self, picture_shape: Picture, new_image_data: bytes) -> None:
         """
-        Replace a picture shape's image.
-        
-        Note: This is a simplified implementation. Full implementation
-        would need to handle maintaining the original size/position.
+        Replace a picture shape's image blob.
         """
         try:
-            # Get original dimensions
-            width = picture_shape.width
-            height = picture_shape.height
-            left = picture_shape.left
-            top = picture_shape.top
+            # Get original relationship ID for the image
+            rId = picture_shape._element.blipFill.blip.embed
+            image_part = picture_shape.part.related_parts[rId]
             
-            # The python-pptx library doesn't have a direct way to replace
-            # the image blob, so we log this as a limitation
-            logger.warning("Image replacement in PPTX requires additional implementation")
+            # Override the blob with new image data
+            # This is an internal but effective way to replace image while keeping shape props
+            image_part._blob = new_image_data
+            
+            logger.info(f"Successfully replaced image blob for {picture_shape.name}")
             
         except Exception as e:
             logger.error(f"Failed to replace picture: {e}")
