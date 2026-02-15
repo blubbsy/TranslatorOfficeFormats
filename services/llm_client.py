@@ -7,17 +7,35 @@ import logging
 from pathlib import Path
 from typing import Optional
 
-from openai import OpenAI
+from openai import (
+    OpenAI,
+    APIConnectionError,
+    APITimeoutError,
+    InternalServerError,
+    RateLimitError,
+)
 from tenacity import (
     retry,
     stop_after_attempt,
     wait_exponential,
     retry_if_exception_type,
+    before_sleep_log,
 )
 
 from settings import settings
 
 logger = logging.getLogger("OfficeTranslator.LLMClient")
+
+# Exception types that warrant a retry
+_RETRYABLE = (
+    ConnectionError,
+    TimeoutError,
+    APIConnectionError,
+    APITimeoutError,
+    InternalServerError,
+    RateLimitError,
+    OSError,
+)
 
 
 class LLMClient:
@@ -25,7 +43,7 @@ class LLMClient:
     OpenAI-compatible LLM client with exponential backoff retry logic.
     Supports local LLM backends (LM Studio, AnythingLLM) and cloud providers.
     """
-    
+
     def __init__(
         self,
         base_url: Optional[str] = None,
@@ -33,34 +51,31 @@ class LLMClient:
         model: Optional[str] = None,
         max_retries: Optional[int] = None,
     ):
-        """
-        Initialize LLM client.
-        
-        Args:
-            base_url: API base URL (defaults to settings)
-            api_key: API key (defaults to settings)
-            model: Model identifier (defaults to settings)
-            max_retries: Max retry attempts (defaults to settings)
-        """
         self.base_url: str = base_url or settings.llm_base_url
         self.api_key: str = api_key or settings.llm_api_key
         self.model: str = model or settings.llm_model
         self.max_retries: int = max_retries or settings.max_retries
         self.context_window: int = settings.llm_context_window
-        
+
         self.client = OpenAI(
             base_url=self.base_url,
             api_key=self.api_key,
+            timeout=60.0,
+            max_retries=0,  # we handle retries ourselves via tenacity
         )
-        
+
         self.connected_model_id: Optional[str] = None
-        
+
         # Load glossary if configured
         self.glossary: dict[str, str] = {}
         self._load_glossary()
-        
-        logger.info(f"LLM Client initialized: {self.base_url} using {self.model}")
-    
+
+        logger.info(f"LLM Client initialised: {self.base_url} using {self.model}")
+
+    # ------------------------------------------------------------------
+    # Glossary
+    # ------------------------------------------------------------------
+
     def _load_glossary(self) -> None:
         """Load translation glossary from file if configured."""
         if settings.glossary_file:
@@ -71,53 +86,62 @@ class LLMClient:
                 logger.info(f"Loaded glossary with {len(self.glossary)} entries")
             except Exception as e:
                 logger.warning(f"Failed to load glossary: {e}")
-    
+
+    # ------------------------------------------------------------------
+    # Connection check
+    # ------------------------------------------------------------------
+
     def check_connection(self) -> bool:
-        """
-        Check if LLM backend is reachable.
-        
-        Returns:
-            True if connection successful, False otherwise
-        """
+        """Check if the LLM backend is reachable."""
         try:
-            # Use a short timeout for the check
-            models = self.client.models.list(timeout=5.0)
-            
-            # Auto-detect context window if exposed by backend
+            models = self.client.models.list(timeout=10.0)
+
             if models.data:
-                # We check the first model or iterate to find the active one if we knew it
-                # For simplicity, check the first one as local servers often return just one or consistent configs
                 first_model = models.data[0]
                 self.connected_model_id = first_model.id
-                
-                # Access dictionary representation
-                model_data = first_model.model_dump() if hasattr(first_model, 'model_dump') else first_model.__dict__
-                
-                # Look for common context keys used by LM Studio/Ollama/LocalAI
-                # LM Studio sometimes puts it in 'permission' or root
-                candidates = ['context_window', 'n_ctx', 'max_context_length', 'max_tokens']
-                
-                for key in candidates:
-                    if key in model_data and model_data[key]:
+
+                model_data = (
+                    first_model.model_dump()
+                    if hasattr(first_model, "model_dump")
+                    else first_model.__dict__
+                )
+
+                for key in (
+                    "context_window",
+                    "n_ctx",
+                    "max_context_length",
+                    "max_tokens",
+                ):
+                    val = model_data.get(key)
+                    if val:
                         try:
-                            new_window = int(model_data[key])
+                            new_window = int(val)
                             if new_window > 0 and new_window != self.context_window:
                                 self.context_window = new_window
-                                logger.info(f"Auto-detected context window: {new_window}")
+                                logger.info(
+                                    f"Auto-detected context window: {new_window}"
+                                )
                                 break
                         except (ValueError, TypeError):
                             pass
 
-            logger.debug(f"LLM connection OK. Available models: {[m.id for m in models.data]}")
+            logger.debug(
+                f"LLM connection OK. Models: {[m.id for m in models.data]}"
+            )
             return True
         except Exception as e:
             logger.error(f"LLM connection failed: {e}")
             return False
-    
+
+    # ------------------------------------------------------------------
+    # Text translation
+    # ------------------------------------------------------------------
+
     @retry(
         stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=1, max=8),
-        retry=retry_if_exception_type((ConnectionError, TimeoutError)),
+        wait=wait_exponential(multiplier=1, min=1, max=16),
+        retry=retry_if_exception_type(_RETRYABLE),
+        before_sleep=before_sleep_log(logger, logging.WARNING),
         reraise=True,
     )
     def translate(
@@ -127,40 +151,27 @@ class LLMClient:
         context: Optional[str] = None,
         preserve_formatting: bool = False,
     ) -> str:
-        """
-        Translate text to target language using LLM.
-        
-        Args:
-            text: Text to translate
-            target_language: Target language (defaults to settings)
-            context: Optional context from previous text
-            preserve_formatting: Whether to preserve inline formatting tags
-            
-        Returns:
-            Translated text
-        """
+        """Translate text to *target_language* using the LLM."""
         if not text or not text.strip():
             return text
-        
+
         target_lang = target_language or settings.target_language
-        
-        # Build system prompt
-        system_prompt = self._build_system_prompt(target_lang, context, preserve_formatting)
-        
-        # Apply glossary pre-processing hints
+        system_prompt = self._build_system_prompt(
+            target_lang, context, preserve_formatting
+        )
+
         user_prompt = text
         if self.glossary:
-            glossary_hints = self._get_relevant_glossary_hints(text)
-            if glossary_hints:
-                user_prompt = f"{text}\n\n[Glossary hints: {glossary_hints}]"
-        
+            hints = self._get_relevant_glossary_hints(text)
+            if hints:
+                user_prompt = f"{text}\n\n[Glossary hints: {hints}]"
+
         logger.debug(f"Translating: {text[:50]}...")
-        
-        # Estimate input tokens (very rough: 3 chars per token)
-        # Plus some overhead for system prompt and context
-        estimated_input_tokens = (len(text) // 3) + 250 
+
+        # Token budget
+        estimated_input_tokens = (len(text) // 3) + 250
         available_for_output = max(100, self.context_window - estimated_input_tokens)
-        
+
         try:
             response = self.client.chat.completions.create(
                 model=self.model,
@@ -168,96 +179,39 @@ class LLMClient:
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
                 ],
-                temperature=0.3,  # Lower temperature for more consistent translations
-                max_tokens=min(available_for_output, len(text) * 2),  # Expansion is rarely > 2x
+                temperature=0.3,
+                max_tokens=min(available_for_output, max(len(text) * 2, 200)),
             )
-            
-            translated = response.choices[0].message.content.strip()
+
+            # Defensive: handle missing/empty response
+            if not response.choices:
+                logger.warning("LLM returned empty choices list")
+                return text
+
+            content = response.choices[0].message.content
+            if content is None:
+                logger.warning("LLM returned None content")
+                return text
+
+            translated = content.strip()
             logger.debug(f"Translated to: {translated[:50]}...")
             return translated
-            
+
+        except _RETRYABLE:
+            raise  # let tenacity handle
         except Exception as e:
-            logger.error(f"Translation failed: {e}")
+            logger.error(f"Translation failed (non-retryable): {e}")
             raise
-    
-    def _build_system_prompt(
-        self,
-        target_language: str,
-        context: Optional[str],
-        preserve_formatting: bool,
-    ) -> str:
-        """Build the system prompt for translation."""
-        prompt_parts = [
-            f"You are a professional translator. Translate the following text to {target_language}.",
-            "Maintain the original meaning, tone, and style.",
-            "Preserve proper nouns, technical terms, and named entities in their original language.",
-            "Only output the translation, nothing else.",
-        ]
-        
-        if preserve_formatting:
-            prompt_parts.append(
-                "Preserve any formatting tags like <b>, </b>, <i>, </i> in their exact positions relative to the text."
-            )
-        
-        if context:
-            prompt_parts.append(
-                f"\nContext from previous text (do not translate, use for tone and consistency): {context}"
-            )
-        
-        return "\n".join(prompt_parts)
-    
-    def _get_relevant_glossary_hints(self, text: str) -> str:
-        """Get glossary entries relevant to the input text."""
-        hints = []
-        text_lower = text.lower()
-        
-        for source, target in self.glossary.items():
-            if source.lower() in text_lower:
-                hints.append(f'"{source}" → "{target}"')
-        
-        return ", ".join(hints) if hints else ""
-    
-    def batch_translate(
-        self,
-        texts: list[str],
-        target_language: Optional[str] = None,
-        context_window: Optional[int] = None,
-    ) -> list[str]:
-        """
-        Translate multiple texts with context window.
-        
-        Args:
-            texts: List of texts to translate
-            target_language: Target language
-            context_window: Number of previous translations to use as context
-            
-        Returns:
-            List of translated texts
-        """
-        window_size = context_window if context_window is not None else settings.context_window_size
-        translations = []
-        
-        for i, text in enumerate(texts):
-            # Build context from previous translations
-            context = None
-            if window_size > 0 and i > 0:
-                context_start = max(0, i - window_size)
-                context_texts = translations[context_start:i]
-                context = " ".join(context_texts)
-            
-            try:
-                translated = self.translate(text, target_language, context)
-                translations.append(translated)
-            except Exception as e:
-                logger.error(f"Failed to translate text {i}: {e}")
-                translations.append(text)  # Keep original on failure
-        
-        return translations
+
+    # ------------------------------------------------------------------
+    # Vision / VLM translation
+    # ------------------------------------------------------------------
 
     @retry(
         stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=1, max=8),
-        retry=retry_if_exception_type((ConnectionError, TimeoutError)),
+        wait=wait_exponential(multiplier=1, min=1, max=16),
+        retry=retry_if_exception_type(_RETRYABLE),
+        before_sleep=before_sleep_log(logger, logging.WARNING),
         reraise=True,
     )
     def translate_image(
@@ -266,70 +220,133 @@ class LLMClient:
         target_language: Optional[str] = None,
     ) -> str:
         """
-        Analyze and translate text in an image using a VLM.
-        Returns a JSON string containing regions with bboxes and translated text.
+        Analyse and translate text in an image using a VLM.
+        Returns the raw JSON string from the model.
         """
         target_lang = target_language or settings.target_language
-        
+
         system_prompt = (
             f"You are a sophisticated OCR and translation engine. "
             f"Detect all text in the image and translate it to {target_lang}. "
-            f"Preserve proper nouns, technical terms, and named entities in their original language. "
-            f"Return a JSON object with a single key 'regions', which is a list of objects. "
-            f"Each object must have: "
-            f"'bbox' [x1, y1, x2, y2] (integers), "
-            f"'text' (the translated string), "
-            f"'color' [r, g, b] (original text color, optional), "
-            f"'background' [r, g, b] (original background color, optional). "
+            f"Preserve proper nouns, technical terms, and named entities. "
+            f"Return a JSON object with a single key 'regions', which is a list. "
+            f"Each item must have: "
+            f"'bbox' [x1, y1, x2, y2] (integers, pixel coordinates), "
+            f"'text' (the translated string). "
             f"Do not include the original text. Return ONLY valid JSON."
         )
 
-        try:
+        user_content = [
+            {"type": "text", "text": "Locate and translate all text in this image."},
+            {
+                "type": "image_url",
+                "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"},
+            },
+        ]
+
+        # Try with response_format first, then without
+        for attempt, kwargs in enumerate(
+            [
+                {"response_format": {"type": "json_object"}},
+                {},
+            ]
+        ):
             try:
-                # Try to force JSON mode if supported
                 response = self.client.chat.completions.create(
                     model=self.model,
                     messages=[
                         {"role": "system", "content": system_prompt},
-                        {
-                            "role": "user", 
-                            "content": [
-                                {"type": "text", "text": "Locate and translate all text in this image."},
-                                {
-                                    "type": "image_url", 
-                                    "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}
-                                }
-                            ]
-                        },
+                        {"role": "user", "content": user_content},
                     ],
                     temperature=0.1,
                     max_tokens=2048,
-                    response_format={"type": "json_object"}
+                    **kwargs,
                 )
+
+                content = response.choices[0].message.content if response.choices else None
+                if content:
+                    return content
+
+            except _RETRYABLE:
+                raise  # let tenacity decide
             except Exception as e:
-                # Fallback for backends that don't support response_format or other API errors
-                # We log it and try again without the strict json constraint
-                logger.warning(f"VLM call with json_object failed ({e}), retrying without strict format...")
-                response = self.client.chat.completions.create(
-                    model=self.model,
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {
-                            "role": "user", 
-                            "content": [
-                                {"type": "text", "text": "Locate and translate all text in this image."},
-                                {
-                                    "type": "image_url", 
-                                    "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}
-                                }
-                            ]
-                        },
-                    ],
-                    temperature=0.1,
-                    max_tokens=2048,
-                )
-                
-            return response.choices[0].message.content
-        except Exception as e:
-            logger.error(f"VLM Image translation failed: {e}")
-            raise
+                if attempt == 0:
+                    logger.warning(
+                        f"VLM call with json_object failed ({e}), "
+                        f"retrying without strict format..."
+                    )
+                    continue
+                raise
+
+        # Should not reach here, but just in case
+        raise RuntimeError("VLM image translation returned no content")
+
+    # ------------------------------------------------------------------
+    # Prompt building
+    # ------------------------------------------------------------------
+
+    def _build_system_prompt(
+        self,
+        target_language: str,
+        context: Optional[str],
+        preserve_formatting: bool,
+    ) -> str:
+        parts = [
+            f"You are a professional translator. Translate the following text to {target_language}.",
+            "Maintain the original meaning, tone, and style.",
+            "Preserve proper nouns, technical terms, and named entities in their original language.",
+            "Only output the translation, nothing else.",
+        ]
+
+        if preserve_formatting:
+            parts.append(
+                "Preserve any formatting tags like <b>, </b>, <i>, </i> "
+                "in their exact positions relative to the text."
+            )
+
+        if context:
+            parts.append(
+                f"\nContext from previous text (do not translate, "
+                f"use for tone and consistency): {context}"
+            )
+
+        return "\n".join(parts)
+
+    def _get_relevant_glossary_hints(self, text: str) -> str:
+        hints = []
+        text_lower = text.lower()
+        for source, target in self.glossary.items():
+            if source.lower() in text_lower:
+                hints.append(f'"{source}" → "{target}"')
+        return ", ".join(hints) if hints else ""
+
+    # ------------------------------------------------------------------
+    # Batch
+    # ------------------------------------------------------------------
+
+    def batch_translate(
+        self,
+        texts: list[str],
+        target_language: Optional[str] = None,
+        context_window: Optional[int] = None,
+    ) -> list[str]:
+        """Translate multiple texts with a sliding context window."""
+        window_size = (
+            context_window if context_window is not None else settings.context_window_size
+        )
+        translations: list[str] = []
+
+        for i, text in enumerate(texts):
+            context = None
+            if window_size > 0 and i > 0:
+                start = max(0, i - window_size)
+                context = " ".join(translations[start:i])
+
+            try:
+                translated = self.translate(text, target_language, context)
+                translations.append(translated)
+            except Exception as e:
+                logger.error(f"Failed to translate text {i}: {e}")
+                translations.append(text)  # keep original on failure
+
+        return translations
