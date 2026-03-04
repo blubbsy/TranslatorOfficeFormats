@@ -2,11 +2,14 @@
 Global Job Queue Manager for handling translation tasks sequentially across all users.
 """
 
+import os
 import threading
+import tempfile
 import time
 import uuid
 import logging
 import pickle
+from enum import Enum
 from pathlib import Path
 import traceback
 from collections import deque
@@ -16,6 +19,17 @@ from streamlit.runtime.scriptrunner import add_script_run_ctx
 
 logger = logging.getLogger("OfficeTranslator.Queue")
 
+
+class JobStatus(str, Enum):
+    """Possible states for a translation job."""
+    PENDING = "pending"
+    PROCESSING = "processing"
+    DONE = "done"
+    ERROR = "error"
+    PAUSED = "paused"
+    CANCELLED = "cancelled"
+
+
 @dataclass
 class Job:
     id: str
@@ -23,8 +37,8 @@ class Job:
     file_data: bytes
     target_lang: str
     settings: Dict[str, Any]
-    owner_session_id: str # To identify which user owns this job
-    status: str = "pending" # pending, processing, done, error, paused
+    owner_session_id: str  # To identify which user owns this job
+    status: JobStatus = JobStatus.PENDING
     progress: float = 0.0
     status_msg: str = "Queued"
     result_data: Optional[bytes] = None
@@ -60,10 +74,22 @@ class GlobalQueueManager:
         logger.info("Global Queue Manager started")
 
     def _save_state(self):
-        """Save current queue state to disk."""
+        """Atomically save current queue state to disk."""
         try:
-            with open(self.STATE_FILE, "wb") as f:
-                pickle.dump({"queue": self.queue, "jobs": self.jobs}, f)
+            fd, tmp_path = tempfile.mkstemp(
+                dir=self.STATE_FILE.parent, suffix=".tmp"
+            )
+            try:
+                with os.fdopen(fd, "wb") as f:
+                    pickle.dump({"queue": self.queue, "jobs": self.jobs}, f)
+                os.replace(tmp_path, self.STATE_FILE)
+            except BaseException:
+                # Clean up temp file on failure
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                raise
         except Exception as e:
             logger.error(f"Failed to save queue state: {e}")
 
@@ -78,8 +104,8 @@ class GlobalQueueManager:
                     
                     # Reset stuck jobs
                     for job_id, job in self.jobs.items():
-                        if job.status == "processing":
-                            job.status = "pending"
+                        if job.status == JobStatus.PROCESSING:
+                            job.status = JobStatus.PENDING
                             job.status_msg = "Resumed after restart"
                             if job_id not in self.queue:
                                 self.queue.appendleft(job_id)
@@ -161,11 +187,11 @@ class GlobalQueueManager:
             
             if job_id in self.jobs:
                 job = self.jobs[job_id]
-                if job.status == "processing":
+                if job.status == JobStatus.PROCESSING:
                     job.cancel_requested = True
                     job.status_msg = "Cancelling..."
                 else:
-                    job.status = "cancelled"
+                    job.status = JobStatus.CANCELLED
                     job.status_msg = "Cancelled"
             
             self._save_state()
@@ -175,14 +201,14 @@ class GlobalQueueManager:
         with self.lock:
             if job_id in self.jobs:
                 job = self.jobs[job_id]
-                if job.status == "processing":
+                if job.status == JobStatus.PROCESSING:
                     job.pause_requested = True
                     job.status_msg = "Pausing..."
-                elif job.status == "pending":
+                elif job.status == JobStatus.PENDING:
                     # If it's still in queue, just mark as paused and remove from queue
                     if job_id in self.queue:
                         self.queue.remove(job_id)
-                    job.status = "paused"
+                    job.status = JobStatus.PAUSED
                     job.status_msg = "Paused"
                 self._save_state()
 
@@ -191,8 +217,8 @@ class GlobalQueueManager:
         with self.lock:
             if job_id in self.jobs:
                 job = self.jobs[job_id]
-                if job.status in ["paused", "error", "cancelled"]:
-                    job.status = "pending"
+                if job.status in (JobStatus.PAUSED, JobStatus.ERROR, JobStatus.CANCELLED):
+                    job.status = JobStatus.PENDING
                     job.pause_requested = False
                     job.cancel_requested = False
                     job.error = None
@@ -206,7 +232,7 @@ class GlobalQueueManager:
         with self.lock:
             to_remove = [
                 jid for jid, job in self.jobs.items() 
-                if job.owner_session_id == session_id and job.status in ["done", "error", "cancelled"]
+                if job.owner_session_id == session_id and job.status in (JobStatus.DONE, JobStatus.ERROR, JobStatus.CANCELLED)
             ]
             for jid in to_remove:
                 del self.jobs[jid]
@@ -230,13 +256,13 @@ class GlobalQueueManager:
             
             if job_id:
                 job = self.jobs.get(job_id)
-                if job and job.status != "cancelled":
+                if job and job.status != JobStatus.CANCELLED:
                     try:
                         logger.info(f"Processing job {job_id}")
                         self.processor_func(job)
                     except Exception as e:
                         logger.error(f"Worker error on job {job_id}: {e}")
-                        job.status = "error"
+                        job.status = JobStatus.ERROR
                         job.error = str(e)
                         job.status_msg = "Internal Error"
                     finally:
@@ -256,7 +282,7 @@ class GlobalQueueManager:
             with self.lock:
                 to_remove = [
                     jid for jid, job in self.jobs.items() 
-                    if now - job.created_at > max_age and job.status in ["done", "error", "cancelled"]
+                    if now - job.created_at > max_age and job.status in (JobStatus.DONE, JobStatus.ERROR, JobStatus.CANCELLED)
                 ]
                 for jid in to_remove:
                     del self.jobs[jid]
@@ -272,7 +298,7 @@ class GlobalQueueManager:
         
         with self.lock:
             for job in self.jobs.values():
-                if job.status == "processing":
+                if job.status == JobStatus.PROCESSING:
                     job.cancel_requested = True
                     job.status_msg = "Server shutting down..."
             self._save_state()
