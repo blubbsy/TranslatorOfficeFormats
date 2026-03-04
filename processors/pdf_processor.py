@@ -13,6 +13,7 @@ from PIL import Image
 
 from .base import BaseFileProcessor, ContentChunk, ContentType
 from settings import settings
+from utils.text_utils import sample_region_background
 
 logger = logging.getLogger("OfficeTranslator.PdfProcessor")
 
@@ -579,20 +580,9 @@ class PdfProcessor(BaseFileProcessor):
         try:
             pix = page.get_pixmap(clip=rect)
             img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-            w, h = img.size
-            if w < 2 or h < 2:
+            if img.size[0] < 2 or img.size[1] < 2:
                 return (1, 1, 1)
-            samples = [
-                img.getpixel((0, 0)),
-                img.getpixel((w - 1, 0)),
-                img.getpixel((0, h - 1)),
-                img.getpixel((w - 1, h - 1)),
-                img.getpixel((w // 2, 0)),
-                img.getpixel((w // 2, h - 1)),
-                img.getpixel((0, h // 2)),
-                img.getpixel((w - 1, h // 2)),
-            ]
-            avg_bg = tuple(sum(s[i] for s in samples) // len(samples) for i in range(3))
+            avg_bg = sample_region_background(img)
             return tuple(v / 255.0 for v in avg_bg)
         except Exception as e:
             logger.debug(f"Background sampling failed: {e}")
