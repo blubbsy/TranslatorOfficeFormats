@@ -136,7 +136,7 @@ class PptxProcessor(BaseFileProcessor):
                             "slide": slide_idx,
                             "shape": shape_idx,
                             "paragraph": para_idx,
-                            "has_formatting": self._has_formatting(paragraph),
+                            "has_formatting": self._paragraph_has_formatting(paragraph),
                         },
                     )
 
@@ -189,7 +189,7 @@ class PptxProcessor(BaseFileProcessor):
 
         slide_idx, paragraph = self._shape_map[chunk_id]
 
-        if settings.preserve_formatting and self._has_formatting(paragraph):
+        if settings.preserve_formatting and self._paragraph_has_formatting(paragraph):
             self._apply_with_formatting(paragraph, str(translated_content))
         else:
             # Simple replacement
@@ -204,14 +204,6 @@ class PptxProcessor(BaseFileProcessor):
         path = Path(output_path)
         self._document.save(path)
         logger.info(f"Saved PPTX: {path.name}")
-
-    def _has_formatting(self, paragraph) -> bool:
-        """Check if paragraph has inline formatting."""
-        for run in paragraph.runs:
-            font = run.font
-            if font.bold or font.italic or font.underline:
-                return True
-        return False
 
     def _simple_replace(self, paragraph, text: str) -> None:
         """Replace paragraph text, preserving first run's formatting including color."""

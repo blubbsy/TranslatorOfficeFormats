@@ -144,6 +144,20 @@ class BaseFileProcessor(ABC):
             count += 1
         return count
 
+    @staticmethod
+    def _paragraph_has_formatting(paragraph) -> bool:
+        """Check whether *paragraph* has inline formatting (bold/italic/underline).
+
+        Works with both ``python-docx`` and ``python-pptx`` paragraph objects
+        because both expose ``.runs`` with ``.bold``, ``.italic``, and
+        ``.underline`` (or ``.font.bold`` etc.) attributes.
+        """
+        for run in paragraph.runs:
+            font = getattr(run, "font", run)
+            if getattr(font, "bold", False) or getattr(font, "italic", False) or getattr(font, "underline", False):
+                return True
+        return False
+
     def _validate_loaded(self) -> None:
         """Raise error if no document is loaded."""
         if not self.is_loaded:
