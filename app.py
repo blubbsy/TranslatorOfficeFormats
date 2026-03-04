@@ -18,7 +18,7 @@ from streamlit.runtime.scriptrunner import add_script_run_ctx
 
 from settings import settings
 from processors import ProcessorFactory
-from services.queue_manager import GlobalQueueManager, Job
+from services.queue_manager import GlobalQueueManager, Job, JobStatus
 from services.job_runner import run_translation_job
 from utils.logging_handler import setup_logging, get_log_entries, clear_logs
 from utils.text_utils import format_size
@@ -219,7 +219,7 @@ def render_queue_fragment(queue_manager: GlobalQueueManager, session_id: str):
         # Batch Actions (Right aligned via columns)
         b1, b2 = st.columns([1, 1])
         with b1:
-            completed_jobs = [j for j in jobs if j.status == "done" and j.result_data]
+            completed_jobs = [j for j in jobs if j.status == JobStatus.DONE and j.result_data]
             if completed_jobs:
                 zip_buffer = io.BytesIO()
                 with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -247,11 +247,11 @@ def render_queue_fragment(queue_manager: GlobalQueueManager, session_id: str):
             
             # 1. Icon
             with c1:
-                if job.status == "done":
+                if job.status == JobStatus.DONE:
                     st.write("✅")
-                elif job.status == "error":
+                elif job.status == JobStatus.ERROR:
                     st.write("❌")
-                elif job.status == "processing":
+                elif job.status == JobStatus.PROCESSING:
                     st.write("🔄")
                 else:
                     st.write("⏳")
@@ -263,10 +263,10 @@ def render_queue_fragment(queue_manager: GlobalQueueManager, session_id: str):
 
             # 3. Status / Progress
             with c3:
-                if job.status == "processing":
+                if job.status == JobStatus.PROCESSING:
                     st.progress(job.progress)
                     st.caption(f"{job.status_msg} ({int(job.progress * 100)}%)")
-                elif job.status == "error":
+                elif job.status == JobStatus.ERROR:
                     st.error(job.status_msg, icon="🚨")
                 else:
                     st.caption(job.status_msg)
@@ -287,7 +287,7 @@ def render_queue_fragment(queue_manager: GlobalQueueManager, session_id: str):
                 a1, a2, a3, a4 = st.columns(4)
                 
                 # Download
-                if job.status == "done" and job.result_data:
+                if job.status == JobStatus.DONE and job.result_data:
                     with a1:
                         st.download_button(
                             "📥",
@@ -298,7 +298,7 @@ def render_queue_fragment(queue_manager: GlobalQueueManager, session_id: str):
                         )
                 
                 # Pause / Resume / Cancel
-                if job.status == "processing":
+                if job.status == JobStatus.PROCESSING:
                     with a2:
                         if st.button("⏸️", key=f"pause_{job.id}", help=t('btn_pause')):
                             queue_manager.pause_job(job.id)
@@ -306,7 +306,7 @@ def render_queue_fragment(queue_manager: GlobalQueueManager, session_id: str):
                         if st.button("❌", key=f"cancel_{job.id}", help="Cancel"):
                             queue_manager.cancel_job(job.id)
                             st.rerun()
-                elif job.status == "pending":
+                elif job.status == JobStatus.PENDING:
                     with a1:
                         if st.button("⬆️", key=f"up_{job.id}", disabled=(idx == 0), help="Move Up"):
                             queue_manager.reorder_job(job.id, "up")
@@ -322,7 +322,7 @@ def render_queue_fragment(queue_manager: GlobalQueueManager, session_id: str):
                         if st.button("🗑️", key=f"cl_{job.id}", help="Cancel"):
                             queue_manager.cancel_job(job.id)
                             st.rerun()
-                elif job.status in ["paused", "error", "cancelled"]:
+                elif job.status in (JobStatus.PAUSED, JobStatus.ERROR, JobStatus.CANCELLED):
                     with a1:
                          if st.button("▶️", key=f"resume_{job.id}", help=t("btn_resume")):
                              queue_manager.resume_job(job.id)

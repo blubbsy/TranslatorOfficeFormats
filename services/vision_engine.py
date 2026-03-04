@@ -55,6 +55,19 @@ class VisionEngine:
     Uses EasyOCR for text detection and Pillow for overlay creation.
     """
 
+    # OCR tuning constants
+    MIN_OCR_DIM = 300        # Minimum dimension (px) before upscaling for OCR
+    OCR_CONFIDENCE_THRESHOLD = 0.15  # Minimum confidence to accept a detection
+    CONTRAST_ENHANCE = 1.5   # Contrast enhancement factor for OCR pre-processing
+    SHARPNESS_ENHANCE = 1.5  # Sharpness enhancement factor for OCR pre-processing
+
+    # VLM constants
+    VLM_MAX_DIM = 1024       # Maximum image dimension sent to VLM
+    VLM_JPEG_QUALITY = 85    # JPEG quality for VLM encoding
+
+    # Reader recovery
+    MAX_READER_RETRIES = 3   # How many times to retry EasyOCR init before giving up
+
     def __init__(self, use_gpu: bool = False):
         from settings import settings
 
@@ -64,7 +77,7 @@ class VisionEngine:
         self.target_language = settings.target_language
         self.use_gpu = use_gpu
         self._reader = None  # Lazy-loaded
-        self._reader_failed = False  # Set True if EasyOCR can't initialise
+        self._reader_init_failures = 0  # Track consecutive init failures
 
         logger.info(
             f"VisionEngine initialised for languages: {self.languages}, "
@@ -80,7 +93,7 @@ class VisionEngine:
         """Lazy-load EasyOCR reader. Returns None if unavailable."""
         if self._reader is not None:
             return self._reader
-        if self._reader_failed:
+        if self._reader_init_failures >= self.MAX_READER_RETRIES:
             return None
         try:
             import easyocr  # noqa: deferred import to avoid crash if not installed
@@ -91,11 +104,16 @@ class VisionEngine:
                 gpu=self.use_gpu,
                 verbose=False,
             )
+            self._reader_init_failures = 0
             logger.info("EasyOCR model loaded")
             return self._reader
         except Exception as e:
-            logger.warning(f"EasyOCR could not be initialised: {e}")
-            self._reader_failed = True
+            self._reader_init_failures += 1
+            remaining = self.MAX_READER_RETRIES - self._reader_init_failures
+            logger.warning(
+                f"EasyOCR could not be initialised: {e} "
+                f"({remaining} retries remaining)"
+            )
             return None
 
     # ------------------------------------------------------------------
@@ -113,17 +131,16 @@ class VisionEngine:
             image = Image.open(io.BytesIO(image_data)).convert("RGB")
 
             # Upscale small images for better OCR accuracy
-            MIN_OCR_DIM = 300
             w, h = image.size
-            if w < MIN_OCR_DIM or h < MIN_OCR_DIM:
-                scale = max(MIN_OCR_DIM / w, MIN_OCR_DIM / h, 1.0)
+            if w < self.MIN_OCR_DIM or h < self.MIN_OCR_DIM:
+                scale = max(self.MIN_OCR_DIM / w, self.MIN_OCR_DIM / h, 1.0)
                 new_size = (int(w * scale), int(h * scale))
                 image = image.resize(new_size, Image.Resampling.LANCZOS)
                 logger.debug(f"Upscaled image for OCR: ({w},{h}) -> {new_size}")
 
             # Enhance contrast + sharpness
-            image_processed = ImageEnhance.Contrast(image).enhance(1.5)
-            image_processed = ImageEnhance.Sharpness(image_processed).enhance(1.5)
+            image_processed = ImageEnhance.Contrast(image).enhance(self.CONTRAST_ENHANCE)
+            image_processed = ImageEnhance.Sharpness(image_processed).enhance(self.SHARPNESS_ENHANCE)
 
             image_np = np.array(image_processed)
 
@@ -150,7 +167,7 @@ class VisionEngine:
                     int(max(y_coords)),
                 )
 
-                if text.strip() and confidence > 0.15:
+                if text.strip() and confidence > self.OCR_CONFIDENCE_THRESHOLD:
                     regions.append(
                         TextRegion(
                             bbox=bbox,
@@ -214,6 +231,7 @@ class VisionEngine:
                         max_font_size=min(32, max(8, box_height - 2)),
                         min_font_size=6,
                         language=lang,
+                        angle=region.angle,
                     )
                 except Exception:
                     font = ImageFont.load_default()
@@ -304,7 +322,7 @@ class VisionEngine:
             image = Image.open(io.BytesIO(image_data)).convert("RGB")
             orig_size = image.size
 
-            MAX_DIM = 1024
+            MAX_DIM = self.VLM_MAX_DIM
             if max(orig_size) > MAX_DIM:
                 scale = MAX_DIM / max(orig_size)
                 new_size = (int(orig_size[0] * scale), int(orig_size[1] * scale))
@@ -315,7 +333,7 @@ class VisionEngine:
 
             # 2. Encode to base64
             buffered = io.BytesIO()
-            image.save(buffered, format="JPEG", quality=85)
+            image.save(buffered, format="JPEG", quality=self.VLM_JPEG_QUALITY)
             b64_img = base64.b64encode(buffered.getvalue()).decode("utf-8")
 
             # 3. Call VLM

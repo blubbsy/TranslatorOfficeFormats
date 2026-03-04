@@ -65,7 +65,7 @@ class DocxProcessor(BaseFileProcessor):
                     location=f"Paragraph {para_idx + 1}",
                     metadata={
                         "style": paragraph.style.name if paragraph.style else None,
-                        "has_formatting": self._has_formatting(paragraph),
+                        "has_formatting": self._paragraph_has_formatting(paragraph),
                     },
                 )
                 chunk_index += 1
@@ -148,8 +148,7 @@ class DocxProcessor(BaseFileProcessor):
         if paragraph is None:
             return
 
-        if settings.preserve_formatting and self._has_formatting(paragraph):
-            self._apply_with_formatting(paragraph, str(translated_content))
+        if settings.preserve_formatting and self._paragraph_has_formatting(paragraph):            self._apply_with_formatting(paragraph, str(translated_content))
         else:
             # Simple replacement - clears formatting but is reliable
             paragraph.clear()
@@ -169,13 +168,6 @@ class DocxProcessor(BaseFileProcessor):
         path = Path(output_path)
         self._document.save(path)
         logger.info(f"Saved DOCX: {path.name}")
-
-    def _has_formatting(self, paragraph: Paragraph) -> bool:
-        """Check if paragraph has inline formatting (bold/italic)."""
-        for run in paragraph.runs:
-            if run.bold or run.italic or run.underline:
-                return True
-        return False
 
     def _apply_with_formatting(
         self, paragraph: Paragraph, translated_text: str

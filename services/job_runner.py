@@ -9,7 +9,7 @@ import traceback
 import concurrent.futures
 from pathlib import Path
 
-from .queue_manager import Job
+from .queue_manager import Job, JobStatus
 from .translation_service import TranslationService
 from .llm_client import LLMClient
 from .vision_engine import VisionEngine
@@ -37,7 +37,7 @@ def run_translation_job(job: Job):
     Execute a translation job.
     Updates the *job* object in-place with progress and results.
     """
-    job.status = "processing"
+    job.status = JobStatus.PROCESSING
     job.status_msg = "Initialising..."
     job.progress = 0.0
 
@@ -69,6 +69,7 @@ def run_translation_job(job: Job):
             )
 
         service = TranslationService(llm_client, vision_engine)
+        service.reset_context()
 
         # --- Processor ---
         processor = get_processor(input_path)
@@ -84,7 +85,7 @@ def run_translation_job(job: Job):
         total_chunks = len(chunks)
 
         if total_chunks == 0:
-            job.status = "done"
+            job.status = JobStatus.DONE
             job.progress = 1.0
             job.status_msg = "Empty document"
             return
@@ -221,14 +222,14 @@ def run_translation_job(job: Job):
             job.result_data = f.read()
 
         job.result_name = f"translated_{job.filename}"
-        job.status = "done"
+        job.status = JobStatus.DONE
         job.progress = 1.0
         job.status_msg = "Complete"
 
     except Exception as e:
         logger.error(f"Job {job.id} failed: {e}")
         logger.debug(traceback.format_exc())
-        job.status = "error"
+        job.status = JobStatus.ERROR
         job.error = str(e)
         job.status_msg = f"Error: {str(e)}"
 
@@ -246,12 +247,12 @@ def _should_stop(job: Job, executor: concurrent.futures.ThreadPoolExecutor) -> b
     """Check cancel / pause flags and shut down the executor if needed."""
     if job.cancel_requested:
         executor.shutdown(wait=False, cancel_futures=True)
-        job.status = "cancelled"
+        job.status = JobStatus.CANCELLED
         job.status_msg = "Cancelled by user"
         return True
     if job.pause_requested:
         executor.shutdown(wait=False, cancel_futures=True)
-        job.status = "paused"
+        job.status = JobStatus.PAUSED
         job.status_msg = "Paused by user"
         return True
     return False

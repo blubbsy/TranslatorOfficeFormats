@@ -77,6 +77,34 @@ def calculate_luminance(rgb: Tuple[int, int, int]) -> float:
     return 0.2126 * r + 0.7152 * g + 0.0722 * b
 
 
+def sample_region_background(region: Image.Image) -> Tuple[int, int, int]:
+    """
+    Sample average background colour from corners and edge midpoints of a region.
+
+    Args:
+        region: An RGB PIL Image to sample.
+
+    Returns:
+        Average RGB tuple (0-255 per channel).
+    """
+    pixels = region.load()
+    w, h = region.size
+    if w < 2 or h < 2:
+        return pixels[0, 0][:3] if w >= 1 and h >= 1 else (255, 255, 255)
+
+    samples = [
+        pixels[0, 0],
+        pixels[w - 1, 0],
+        pixels[0, h - 1],
+        pixels[w - 1, h - 1],
+        pixels[w // 2, 0],
+        pixels[w // 2, h - 1],
+        pixels[0, h // 2],
+        pixels[w - 1, h // 2],
+    ]
+    return tuple(sum(s[i] for s in samples) // len(samples) for i in range(3))
+
+
 def get_contrasting_colors(
     image: Image.Image,
     bbox: Tuple[int, int, int, int]
@@ -98,23 +126,8 @@ def get_contrasting_colors(
     # Crop the region
     region = image.crop((x1, y1, x2, y2)).convert("RGB")
     
-    # 1. Detect Background Color (sample corners and edges)
-    pixels = region.load()
-    w, h = region.size
-    samples = []
-    # Corners
-    samples.append(pixels[0, 0])
-    samples.append(pixels[w-1, 0])
-    samples.append(pixels[0, h-1])
-    samples.append(pixels[w-1, h-1])
-    # Edge midpoints
-    samples.append(pixels[w//2, 0])
-    samples.append(pixels[w//2, h-1])
-    samples.append(pixels[0, h//2])
-    samples.append(pixels[w-1, h//2])
-    
-    # Calculate average background from samples
-    avg_bg = tuple(sum(s[i] for s in samples) // len(samples) for i in range(3))
+    # 1. Detect Background Color
+    avg_bg = sample_region_background(region)
     
     # 2. Detect Original Text Color
     # We look for the color that is MOST different from the background
@@ -147,11 +160,41 @@ def fit_text_to_box(
     box_height: int,
     max_font_size: int = 24,
     min_font_size: int = 8,
-    language: str = "English"
+    language: str = "English",
+    angle: float = 0.0,
 ) -> Tuple[ImageFont.FreeTypeFont, int]:
     """
     Find the largest font size that fits text within a bounding box.
+
+    When *angle* is non-zero the available width/height are adjusted to
+    account for the rotated text footprint inside the axis-aligned box.
     """
+    # When text is rotated, the axis-aligned bbox of the rotated text is
+    # larger than the text itself.  We compute the effective dimensions
+    # that are available along the text's own axes.
+    if abs(angle) > 0.5:
+        rad = math.radians(abs(angle))
+        cos_a = abs(math.cos(rad))
+        sin_a = abs(math.sin(rad))
+        # Solve for the maximum text dimensions (tw, th) such that the
+        # rotated bounding box fits inside the axis-aligned box:
+        #   tw * cos(a) + th * sin(a) <= box_width
+        #   tw * sin(a) + th * cos(a) <= box_height
+        # Solving this 2×2 system gives a denominator of cos²(a) - sin²(a),
+        # which equals cos(2a).  At 45° this is zero, so we fall back.
+        denom = cos_a * cos_a - sin_a * sin_a
+        if abs(denom) > 1e-6:
+            eff_w = abs((box_width * cos_a - box_height * sin_a) / denom)
+            eff_h = abs((box_height * cos_a - box_width * sin_a) / denom)
+        else:
+            # ~45° – both axes contribute equally
+            diag = (box_width + box_height) / 2.0
+            eff_w = eff_h = diag / math.sqrt(2)
+        eff_w = max(int(eff_w), 1)
+        eff_h = max(int(eff_h), 1)
+    else:
+        eff_w, eff_h = box_width, box_height
+
     font_size = max_font_size
     
     while font_size >= min_font_size:
@@ -164,7 +207,7 @@ def fit_text_to_box(
         text_width = bbox[2] - bbox[0]
         text_height = bbox[3] - bbox[1]
         
-        if text_width <= box_width and text_height <= box_height:
+        if text_width <= eff_w and text_height <= eff_h:
             return font, font_size
         
         font_size -= 1
@@ -183,34 +226,49 @@ def draw_rotated_text(
     original_bbox: Optional[Tuple[int, int, int, int]] = None
 ):
     """
-    Draw text rotated around its center. 
+    Draw text rotated around its center.
     If original_bbox is provided, it clears that area first with bg_fill.
+    Handles edge-case angles (near 0°, 90°, etc.) and clips to image bounds.
     """
     draw = ImageDraw.Draw(image)
-    
+
     # 1. Clear original area if requested
     if original_bbox and bg_fill:
         draw.rectangle(original_bbox, fill=bg_fill)
-    
-    # 2. Prepare rotated text
+
+    # 2. Measure text
     dummy = Image.new("RGBA", (1, 1))
     dummy_draw = ImageDraw.Draw(dummy)
     bbox = dummy_draw.textbbox((0, 0), text, font=font)
     w, h = bbox[2] - bbox[0], bbox[3] - bbox[1]
-    
-    # Add padding
+
+    if w <= 0 or h <= 0:
+        return
+
+    # 3. Render text on transparent canvas
     pad = 4
-    txt_img = Image.new("RGBA", (w + pad*2, h + pad*2), (0, 0, 0, 0))
+    txt_img = Image.new("RGBA", (w + pad * 2, h + pad * 2), (0, 0, 0, 0))
     txt_draw = ImageDraw.Draw(txt_img)
-    txt_draw.text((pad, pad), text, font=font, fill=fill)
-    
-    # Rotate
-    rotated = txt_img.rotate(angle, expand=True, resample=Image.Resampling.BICUBIC)
-    
-    # Paste
+    # Offset by -bbox origin to compensate for fonts with non-zero bearing
+    # (textbbox may return negative x0/y0 for descenders or left-bearing).
+    txt_draw.text((pad - bbox[0], pad - bbox[1]), text, font=font, fill=fill)
+
+    # 4. Rotate (skip if angle is negligible for crispness)
+    if abs(angle) > 0.5:
+        rotated = txt_img.rotate(angle, expand=True, resample=Image.Resampling.BICUBIC)
+    else:
+        rotated = txt_img
+
+    # 5. Composite at centre, clipped to image bounds
     rw, rh = rotated.size
-    top_left = (int(center[0] - rw/2), int(center[1] - rh/2))
-    image.alpha_composite(rotated, top_left)
+    tx = int(center[0] - rw / 2)
+    ty = int(center[1] - rh / 2)
+
+    # Clip to image dimensions
+    tx = max(0, min(tx, image.width - rw))
+    ty = max(0, min(ty, image.height - rh))
+
+    image.alpha_composite(rotated, (tx, ty))
 
 
 def wrap_text(
