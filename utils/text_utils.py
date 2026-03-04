@@ -176,8 +176,12 @@ def fit_text_to_box(
         rad = math.radians(abs(angle))
         cos_a = abs(math.cos(rad))
         sin_a = abs(math.sin(rad))
-        # Solve for max (tw, th) such that tw*cos + th*sin <= box_width
-        # and tw*sin + th*cos <= box_height.  We approximate by scaling.
+        # Solve for the maximum text dimensions (tw, th) such that the
+        # rotated bounding box fits inside the axis-aligned box:
+        #   tw * cos(a) + th * sin(a) <= box_width
+        #   tw * sin(a) + th * cos(a) <= box_height
+        # Solving this 2×2 system gives a denominator of cos²(a) - sin²(a),
+        # which equals cos(2a).  At 45° this is zero, so we fall back.
         denom = cos_a * cos_a - sin_a * sin_a
         if abs(denom) > 1e-6:
             eff_w = abs((box_width * cos_a - box_height * sin_a) / denom)
@@ -245,6 +249,8 @@ def draw_rotated_text(
     pad = 4
     txt_img = Image.new("RGBA", (w + pad * 2, h + pad * 2), (0, 0, 0, 0))
     txt_draw = ImageDraw.Draw(txt_img)
+    # Offset by -bbox origin to compensate for fonts with non-zero bearing
+    # (textbbox may return negative x0/y0 for descenders or left-bearing).
     txt_draw.text((pad - bbox[0], pad - bbox[1]), text, font=font, fill=fill)
 
     # 4. Rotate (skip if angle is negligible for crispness)
