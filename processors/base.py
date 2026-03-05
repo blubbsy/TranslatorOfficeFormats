@@ -49,7 +49,7 @@ class BaseFileProcessor(ABC):
     # File extensions this processor handles
     SUPPORTED_EXTENSIONS: list[str] = []
 
-    def __init__(self):
+    def __init__(self) -> None:
         self._document: Any = None
         self._file_path: Optional[Path] = None
         self._chunks_cache: dict[str, ContentChunk] = {}
@@ -154,7 +154,11 @@ class BaseFileProcessor(ABC):
         """
         for run in paragraph.runs:
             font = getattr(run, "font", run)
-            if getattr(font, "bold", False) or getattr(font, "italic", False) or getattr(font, "underline", False):
+            if (
+                getattr(font, "bold", False)
+                or getattr(font, "italic", False)
+                or getattr(font, "underline", False)
+            ):
                 return True
         return False
 

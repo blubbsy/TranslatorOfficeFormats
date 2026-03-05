@@ -48,6 +48,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "method_vlm": "Experimental (VLM)",
         "btn_pause": "Pause",
         "btn_resume": "Resume",
+        "ocr_restriction_warn": "Note: EasyOCR combined restricted scripts (Chinese/Japanese/Korean/Thai/Hindi) only with English. Other OCR source languages were removed for compatibility.",
     },
     "de": {
         "title": "OfficeTranslator",
@@ -86,6 +87,7 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "method_vlm": "Experimentell (VLM)",
         "btn_pause": "Pause",
         "btn_resume": "Fortsetzen",
+        "ocr_restriction_warn": "Hinweis: EasyOCR erlaubt eingeschränkte Schriften (Chinesisch/Japanisch/Koreanisch/Thai/Hindi) nur in Kombination mit Englisch. Andere OCR-Quellsprachen wurden zur Kompatibilität entfernt.",
     },
 }
 
@@ -95,8 +97,9 @@ AVAILABLE_LANGUAGES = {
     # Placeholders for others using English fallback for now
     "fr": "Français",
     "es": "Español",
-    "zh": "中文"
+    "zh": "中文",
 }
+
 
 def get_system_language() -> str:
     """Detect system language code (e.g., 'en', 'de'). Defaults to 'en'."""
@@ -110,6 +113,7 @@ def get_system_language() -> str:
         logger.warning(f"Failed to detect system language: {e}")
     return "en"
 
+
 def t(key: str) -> str:
     """Get translation for key based on session language."""
     lang = st.session_state.get("ui_language", "en")
@@ -117,10 +121,12 @@ def t(key: str) -> str:
     lang_dict = TRANSLATIONS.get(lang, TRANSLATIONS["en"])
     return lang_dict.get(key, TRANSLATIONS["en"].get(key, key))
 
+
 def set_language(lang_code: str):
     """Set the UI language."""
     if lang_code in AVAILABLE_LANGUAGES:
         st.session_state.ui_language = lang_code
+
 
 def init_i18n():
     """Initialize UI language in session state."""

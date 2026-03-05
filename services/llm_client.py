@@ -125,9 +125,7 @@ class LLMClient:
                         except (ValueError, TypeError):
                             pass
 
-            logger.debug(
-                f"LLM connection OK. Models: {[m.id for m in models.data]}"
-            )
+            logger.debug(f"LLM connection OK. Models: {[m.id for m in models.data]}")
             return True
         except Exception as e:
             logger.error(f"LLM connection failed: {e}")
@@ -244,10 +242,10 @@ class LLMClient:
             },
         ]
 
-        # Try with response_format first, then without
+        # Try with explicit text format first, then without any format specification
         for attempt, kwargs in enumerate(
             [
-                {"response_format": {"type": "json_object"}},
+                {"response_format": {"type": "text"}},
                 {},
             ]
         ):
@@ -263,7 +261,9 @@ class LLMClient:
                     **kwargs,
                 )
 
-                content = response.choices[0].message.content if response.choices else None
+                content = (
+                    response.choices[0].message.content if response.choices else None
+                )
                 if content:
                     return content
 
@@ -272,8 +272,8 @@ class LLMClient:
             except Exception as e:
                 if attempt == 0:
                     logger.warning(
-                        f"VLM call with json_object failed ({e}), "
-                        f"retrying without strict format..."
+                        f"VLM call with explicit text format failed ({e}), "
+                        f"retrying without format specification..."
                     )
                     continue
                 raise
@@ -332,7 +332,9 @@ class LLMClient:
     ) -> list[str]:
         """Translate multiple texts with a sliding context window."""
         window_size = (
-            context_window if context_window is not None else settings.context_window_size
+            context_window
+            if context_window is not None
+            else settings.context_window_size
         )
         translations: list[str] = []
 

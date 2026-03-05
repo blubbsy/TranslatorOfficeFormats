@@ -4,7 +4,7 @@ PPTX presentation processor for PowerPoint files.
 
 import logging
 from pathlib import Path
-from typing import Generator
+from typing import Generator, Any
 
 from pptx import Presentation
 from pptx.shapes.base import BaseShape
@@ -22,7 +22,7 @@ class PptxProcessor(BaseFileProcessor):
 
     SUPPORTED_EXTENSIONS = ["pptx"]
 
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__()
         self._document = None
         self._shape_map: dict[str, tuple] = {}  # id -> (slide_idx, shape reference)
@@ -39,7 +39,7 @@ class PptxProcessor(BaseFileProcessor):
             raise ValueError(f"Not a PPTX file: {path}")
 
         try:
-            self._document = Presentation(path)
+            self._document = Presentation(str(path))
             self._file_path = path
             self._shape_map.clear()
             self._image_map.clear()
@@ -118,8 +118,10 @@ class PptxProcessor(BaseFileProcessor):
             return
 
         # Handle text frames
-        if shape.has_text_frame:
-            text_frame = shape.text_frame
+        if hasattr(shape, "has_text_frame") and shape.has_text_frame:
+            text_frame = getattr(shape, "text_frame", None)
+            if not text_frame:
+                return
 
             for para_idx, paragraph in enumerate(text_frame.paragraphs):
                 para_text = paragraph.text.strip()
@@ -141,8 +143,10 @@ class PptxProcessor(BaseFileProcessor):
                     )
 
         # Handle tables
-        if shape.has_table:
-            table = shape.table
+        if hasattr(shape, "has_table") and shape.has_table:
+            table = getattr(shape, "table", None)
+            if not table:
+                return
             for row_idx, row in enumerate(table.rows):
                 for cell_idx, cell in enumerate(row.cells):
                     cell_text = cell.text.strip()
@@ -260,9 +264,12 @@ class PptxProcessor(BaseFileProcessor):
         Replace a picture shape's image blob.
         """
         try:
-            # Get original relationship ID for the image
-            rId = picture_shape._element.blipFill.blip.embed
-            image_part = picture_shape.part.related_parts[rId]
+            # Type-safe access to internal picture blob
+            pic_element: Any = picture_shape._element
+            rId = pic_element.blipFill.blip.embed
+            # mypy can't easily see slide part properties when accessing through BaseSlidePart
+            pic_part: Any = picture_shape.part
+            image_part = pic_part.related_parts[rId]
 
             # Override the blob with new image data
             # This is an internal but effective way to replace image while keeping shape props

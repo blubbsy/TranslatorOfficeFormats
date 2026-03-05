@@ -23,3 +23,6 @@ translations.zip
 # OS files
 .DS_Store
 Thumbs.db
+
+# Models
+.easyocr_models/

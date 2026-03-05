@@ -4,9 +4,10 @@ DOCX document processor for Word files.
 
 import logging
 from pathlib import Path
-from typing import Generator
+from typing import Generator, Any
 
-from docx import Document
+from docx import Document as DocxDocument
+from docx.api import Document as DocumentType
 from docx.opc.exceptions import PackageNotFoundError
 from docx.text.paragraph import Paragraph
 
@@ -21,9 +22,9 @@ class DocxProcessor(BaseFileProcessor):
 
     SUPPORTED_EXTENSIONS = ["docx"]
 
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__()
-        self._document: Document = None
+        self._document: Any = None
         self._paragraph_map: dict[str, Paragraph] = {}
         self._image_map: dict[str, tuple] = {}  # id -> (run, inline_shape_index)
 
@@ -38,7 +39,7 @@ class DocxProcessor(BaseFileProcessor):
             raise ValueError(f"Not a DOCX file: {path}")
 
         try:
-            self._document = Document(path)
+            self._document = DocxDocument(str(path))
             self._file_path = path
             self._paragraph_map.clear()
             self._image_map.clear()
@@ -102,9 +103,10 @@ class DocxProcessor(BaseFileProcessor):
                     if cell_text:
                         chunk_id = f"table_{table_idx}_r{row_idx}_c{cell_idx}"
                         # Store reference to cell paragraphs
-                        self._paragraph_map[chunk_id] = (
+                        first_para: Any = (
                             cell.paragraphs[0] if cell.paragraphs else None
                         )
+                        self._paragraph_map[chunk_id] = first_para
 
                         yield ContentChunk(
                             id=chunk_id,
@@ -148,7 +150,8 @@ class DocxProcessor(BaseFileProcessor):
         if paragraph is None:
             return
 
-        if settings.preserve_formatting and self._paragraph_has_formatting(paragraph):            self._apply_with_formatting(paragraph, str(translated_content))
+        if settings.preserve_formatting and self._paragraph_has_formatting(paragraph):
+            self._apply_with_formatting(paragraph, str(translated_content))
         else:
             # Simple replacement - clears formatting but is reliable
             paragraph.clear()

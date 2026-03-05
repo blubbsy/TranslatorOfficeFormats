@@ -6,9 +6,9 @@ import io
 import logging
 from collections import Counter
 from pathlib import Path
-from typing import Generator
+from typing import Generator, Any
 
-import fitz  # PyMuPDF
+import fitz  # type: ignore # PyMuPDF
 from PIL import Image
 
 from .base import BaseFileProcessor, ContentChunk, ContentType
@@ -33,9 +33,9 @@ class PdfProcessor(BaseFileProcessor):
 
     SUPPORTED_EXTENSIONS = ["pdf"]
 
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__()
-        self._document: fitz.Document = None
+        self._document: fitz.Document = None  # type: ignore
         self._text_blocks: dict[str, dict] = {}  # id -> {page, rect, text, ...}
         self._toc: list = []
         self._translated_toc: list = []
@@ -326,7 +326,7 @@ class PdfProcessor(BaseFileProcessor):
         Upscales tiny images so OCR has a better chance.
         """
         try:
-            img = Image.open(io.BytesIO(data))
+            img: Any = Image.open(io.BytesIO(data))
             img.verify()  # verify integrity
             # Re-open (verify consumes the file)
             img = Image.open(io.BytesIO(data)).convert("RGB")
@@ -579,7 +579,7 @@ class PdfProcessor(BaseFileProcessor):
         """Sample the page background colour around *rect*."""
         try:
             pix = page.get_pixmap(clip=rect)
-            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+            img = Image.frombytes("RGB", (int(pix.width), int(pix.height)), pix.samples)
             if img.size[0] < 2 or img.size[1] < 2:
                 return (1, 1, 1)
             avg_bg = sample_region_background(img)
@@ -599,17 +599,18 @@ class PdfProcessor(BaseFileProcessor):
         count = 0
         for page in self._document:
             try:
-                blocks = page.get_text("dict")["blocks"]
+                page_dict: dict = page.get_text("dict")  # type: ignore
+                blocks = page_dict.get("blocks", [])
             except Exception:
                 continue
             for block in blocks:
-                if block["type"] == 0:
+                if block.get("type") == 0:
                     block_text = ""
                     for line in block.get("lines", []):
                         for span in line.get("spans", []):
                             block_text += span.get("text", "")
                     if block_text.strip():
                         count += 1
-                elif block["type"] == 1:
+                elif block.get("type") == 1:
                     count += 1
         return count

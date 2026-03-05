@@ -13,7 +13,7 @@ import math
 import base64
 import traceback
 from dataclasses import dataclass
-from typing import List, Tuple, Optional, Callable
+from typing import List, Tuple, Optional, Callable, Any
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont, ImageEnhance, ImageOps
@@ -26,6 +26,106 @@ from utils.text_utils import (
 )
 
 logger = logging.getLogger("OfficeTranslator.VisionEngine")
+
+
+# ---------------------------------------------------------------------------
+# EasyOCR language code mapping
+# Maps common locale / ISO-639 codes to the identifiers EasyOCR actually accepts.
+# ---------------------------------------------------------------------------
+
+_EASYOCR_LANG_MAP: dict[str, str] = {
+    # Chinese
+    "zh": "ch_sim",
+    "zh-cn": "ch_sim",
+    "zh_cn": "ch_sim",
+    "zh-hans": "ch_sim",
+    "chinese": "ch_sim",
+    "ch_sim": "ch_sim",
+    "zh-tw": "ch_tra",
+    "zh_tw": "ch_tra",
+    "zh-hant": "ch_tra",
+    "ch_tra": "ch_tra",
+    # Japanese / Korean
+    "ja": "ja",
+    "jp": "ja",
+    "japanese": "ja",
+    "ko": "ko",
+    "kr": "ko",
+    "korean": "ko",
+    # European
+    "en": "en",
+    "english": "en",
+    "de": "de",
+    "german": "de",
+    "fr": "fr",
+    "french": "fr",
+    "es": "es",
+    "spanish": "es",
+    "it": "it",
+    "italian": "it",
+    "pt": "pt",
+    "portuguese": "pt",
+    "ru": "ru",
+    "russian": "ru",
+    "ar": "ar",
+    "arabic": "ar",
+    "nl": "nl",
+    "dutch": "nl",
+    "pl": "pl",
+    "polish": "pl",
+    "tr": "tr",
+    "turkish": "tr",
+    "vi": "vi",
+    "vietnamese": "vi",
+    "th": "th",
+    "thai": "th",
+    "hi": "hi",
+    "hindi": "hi",
+}
+
+
+def _normalise_ocr_languages(raw_codes: list[str]) -> tuple[list[str], bool]:
+    """Convert user-supplied language codes to valid EasyOCR identifiers.
+
+    Matches EasyOCR's compatibility constraints: some languages (like Chinese
+    or Japanese) can only be combined with English. If such a language is
+    detected, only it and English are returned.
+
+    Returns:
+        tuple: (list of valid identifiers, bool indicating if a restriction was applied)
+    """
+    seen: set[str] = set()
+    mapped_codes: list[str] = []
+
+    for code in raw_codes:
+        mapped = _EASYOCR_LANG_MAP.get(code.lower().strip(), code.lower().strip())
+        if mapped not in seen:
+            seen.add(mapped)
+            mapped_codes.append(mapped)
+
+    # EasyOCR constraint: Some languages can ONLY be paired with English.
+    # If we have one of these, we must strip all other non-English languages.
+    restricted_langs = {"ch_sim", "ch_tra", "ja", "ko", "th", "hi"}
+    has_restricted = any(lang in restricted_langs for lang in mapped_codes)
+
+    if has_restricted:
+        # Keep only English + the FIRST restricted language found
+        main_restricted = next(
+            lang for lang in mapped_codes if lang in restricted_langs
+        )
+        result = [main_restricted]
+
+        # Check if we are actually stripping anything other than 'en'
+        original_non_en = [
+            l for l in mapped_codes if l != "en" and l != main_restricted
+        ]
+        was_restricted = len(original_non_en) > 0
+
+        if "en" in mapped_codes or "en" not in result:
+            result.append("en")
+        return result, was_restricted
+
+    return mapped_codes, False
 
 
 # ---------------------------------------------------------------------------
@@ -56,28 +156,33 @@ class VisionEngine:
     """
 
     # OCR tuning constants
-    MIN_OCR_DIM = 300        # Minimum dimension (px) before upscaling for OCR
+    MIN_OCR_DIM = 300  # Minimum dimension (px) before upscaling for OCR
     OCR_CONFIDENCE_THRESHOLD = 0.15  # Minimum confidence to accept a detection
-    CONTRAST_ENHANCE = 1.5   # Contrast enhancement factor for OCR pre-processing
+    CONTRAST_ENHANCE = 1.5  # Contrast enhancement factor for OCR pre-processing
     SHARPNESS_ENHANCE = 1.5  # Sharpness enhancement factor for OCR pre-processing
 
     # VLM constants
-    VLM_MAX_DIM = 1024       # Maximum image dimension sent to VLM
-    VLM_JPEG_QUALITY = 85    # JPEG quality for VLM encoding
+    VLM_MAX_DIM = 1024  # Maximum image dimension sent to VLM
+    VLM_JPEG_QUALITY = 85  # JPEG quality for VLM encoding
 
     # Reader recovery
-    MAX_READER_RETRIES = 3   # How many times to retry EasyOCR init before giving up
+    MAX_READER_RETRIES = 3  # How many times to retry EasyOCR init before giving up
 
     def __init__(self, use_gpu: bool = False):
         from settings import settings
+        import threading
+        from pathlib import Path
 
-        self.languages = [
-            lang.strip() for lang in settings.ocr_source_languages.split(",")
-        ]
+        raw_langs = [lang.strip() for lang in settings.ocr_source_languages.split(",")]
+        self.languages, self.was_restricted = _normalise_ocr_languages(raw_langs)
         self.target_language = settings.target_language
         self.use_gpu = use_gpu
         self._reader = None  # Lazy-loaded
         self._reader_init_failures = 0  # Track consecutive init failures
+        self._init_lock = threading.Lock()
+
+        # Local model storage setup
+        self._model_dir = str(Path(__file__).parent.parent / ".easyocr_models")
 
         logger.info(
             f"VisionEngine initialised for languages: {self.languages}, "
@@ -90,25 +195,32 @@ class VisionEngine:
 
     @property
     def reader(self):
-        """Lazy-load EasyOCR reader. Returns None if unavailable."""
+        """Lazy-load EasyOCR reader. Returns None if unavailable. Thread-safe."""
         if self._reader is not None:
             return self._reader
-        if self._reader_init_failures >= self.MAX_READER_RETRIES:
-            return None
-        try:
-            import easyocr  # noqa: deferred import to avoid crash if not installed
 
-            logger.info("Loading EasyOCR model (this may take a moment)...")
-            self._reader = easyocr.Reader(
-                self.languages,
-                gpu=self.use_gpu,
-                verbose=False,
-            )
-            self._reader_init_failures = 0
-            logger.info("EasyOCR model loaded")
-            return self._reader
-        except Exception as e:
-            self._reader_init_failures += 1
+        with self._init_lock:
+            # Re-check after acquiring the lock in case another thread loaded it
+            if self._reader is not None:
+                return self._reader
+
+            if self._reader_init_failures >= self.MAX_READER_RETRIES:
+                return None
+            try:
+                import easyocr  # type: ignore # noqa: deferred import to avoid crash if not installed
+
+                logger.info("Loading EasyOCR model (this may take a moment)...")
+                self._reader = easyocr.Reader(
+                    self.languages,
+                    gpu=self.use_gpu,
+                    model_storage_directory=self._model_dir,
+                    verbose=False,
+                )
+                self._reader_init_failures = 0
+                logger.info("EasyOCR model loaded")
+                return self._reader
+            except Exception as e:
+                self._reader_init_failures += 1
             remaining = self.MAX_READER_RETRIES - self._reader_init_failures
             logger.warning(
                 f"EasyOCR could not be initialised: {e} "
@@ -119,6 +231,96 @@ class VisionEngine:
     # ------------------------------------------------------------------
     # OCR detection
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _merge_nearby_regions(regions: List[TextRegion]) -> List[TextRegion]:
+        """
+        Merge text regions that are on the same line and close together.
+        This helps with formulas and consistent text that OCR splits up.
+        """
+        if not regions:
+            return regions
+
+        # Sort by y-coordinate (top to bottom)
+        sorted_regions = sorted(regions, key=lambda r: r.bbox[1])
+
+        merged: List[TextRegion] = []
+        current_line: List[TextRegion] = [sorted_regions[0]]
+
+        for region in sorted_regions[1:]:
+            # Check if this region is on approximately the same line as the current line
+            current_y = sum(r.bbox[1] + r.bbox[3] for r in current_line) / (
+                2 * len(current_line)
+            )
+            region_y = (region.bbox[1] + region.bbox[3]) / 2
+            y_threshold = (
+                max(r.bbox[3] - r.bbox[1] for r in current_line) * 0.3
+            )  # 30% of height - only merge text on exact same baseline
+
+            if abs(region_y - current_y) <= y_threshold:
+                # Same line - add to current line group
+                current_line.append(region)
+            else:
+                # Different line - process current line and start new one
+                merged.extend(VisionEngine._process_line(current_line))
+                current_line = [region]
+
+        # Process the last line
+        if current_line:
+            merged.extend(VisionEngine._process_line(current_line))
+
+        return merged
+
+    @staticmethod
+    def _process_line(line_regions: List[TextRegion]) -> List[TextRegion]:
+        """
+        Process regions on the same line: merge if they're close together horizontally.
+        """
+        if not line_regions:
+            return []
+
+        # Sort by x-coordinate (left to right)
+        sorted_line = sorted(line_regions, key=lambda r: r.bbox[0])
+
+        merged: List[TextRegion] = []
+        current = sorted_line[0]
+
+        for next_region in sorted_line[1:]:
+            # Calculate horizontal gap
+            gap = next_region.bbox[0] - current.bbox[2]
+            avg_height = (
+                current.bbox[3]
+                - current.bbox[1]
+                + next_region.bbox[3]
+                - next_region.bbox[1]
+            ) / 2
+
+            # Merge if gap is small (less than 0.8x average character width estimate)
+            # Estimate character width as height * 0.6 (typical aspect ratio)
+            # Only merge text that's very close (like formula components)
+            char_width_estimate = avg_height * 0.6
+
+            if gap < char_width_estimate * 0.8:
+                # Merge regions
+                current = TextRegion(
+                    bbox=(
+                        min(current.bbox[0], next_region.bbox[0]),
+                        min(current.bbox[1], next_region.bbox[1]),
+                        max(current.bbox[2], next_region.bbox[2]),
+                        max(current.bbox[3], next_region.bbox[3]),
+                    ),
+                    text=current.text + " " + next_region.text,
+                    confidence=min(current.confidence, next_region.confidence),
+                    angle=(current.angle + next_region.angle) / 2,
+                )
+            else:
+                # Gap too large - keep as separate regions
+                merged.append(current)
+                current = next_region
+
+        # Add the last region
+        merged.append(current)
+        return merged
 
     def detect_text(self, image_data: bytes) -> List[TextRegion]:
         """Detect text regions in an image with pre-processing for better accuracy."""
@@ -139,45 +341,69 @@ class VisionEngine:
                 logger.debug(f"Upscaled image for OCR: ({w},{h}) -> {new_size}")
 
             # Enhance contrast + sharpness
-            image_processed = ImageEnhance.Contrast(image).enhance(self.CONTRAST_ENHANCE)
-            image_processed = ImageEnhance.Sharpness(image_processed).enhance(self.SHARPNESS_ENHANCE)
+            image_processed = ImageEnhance.Contrast(image).enhance(
+                self.CONTRAST_ENHANCE
+            )
+            image_processed = ImageEnhance.Sharpness(image_processed).enhance(
+                self.SHARPNESS_ENHANCE
+            )
 
             image_np = np.array(image_processed)
 
-            # Run OCR – paragraph=True groups text better for translation
+            # Run OCR with paragraph=False to detect individual text elements
+            # Custom merging logic will combine text on the same line (for formulas)
+            # while keeping separate lines apart (for tables of contents, etc.)
             try:
                 results = reader.readtext(image_np, paragraph=False)
             except Exception as e:
-                logger.warning(f"readtext failed, retrying with defaults: {e}")
-                results = reader.readtext(image_np)
+                logger.error(f"readtext failed: {e}")
+                return []
 
             regions: List[TextRegion] = []
-            for bbox_points, text, confidence in results:
-                x_coords = [p[0] for p in bbox_points]
-                y_coords = [p[1] for p in bbox_points]
+            for result in results:
+                try:
+                    # EasyOCR can return different formats
+                    if len(result) == 3:
+                        bbox_points, text, confidence = result
+                    elif len(result) == 2:
+                        bbox_points, text = result
+                        confidence = 1.0  # No confidence provided
+                    else:
+                        logger.debug(f"Unexpected result format: {result}")
+                        continue
 
-                dx = bbox_points[1][0] - bbox_points[0][0]
-                dy = bbox_points[1][1] - bbox_points[0][1]
-                angle = -math.degrees(math.atan2(dy, dx))
+                    x_coords = [p[0] for p in bbox_points]
+                    y_coords = [p[1] for p in bbox_points]
 
-                bbox = (
-                    int(min(x_coords)),
-                    int(min(y_coords)),
-                    int(max(x_coords)),
-                    int(max(y_coords)),
-                )
+                    dx = bbox_points[1][0] - bbox_points[0][0]
+                    dy = bbox_points[1][1] - bbox_points[0][1]
+                    angle = -math.degrees(math.atan2(dy, dx))
 
-                if text.strip() and confidence > self.OCR_CONFIDENCE_THRESHOLD:
-                    regions.append(
-                        TextRegion(
-                            bbox=bbox,
-                            text=text.strip(),
-                            confidence=confidence,
-                            angle=angle,
-                        )
+                    bbox = (
+                        int(min(x_coords)),
+                        int(min(y_coords)),
+                        int(max(x_coords)),
+                        int(max(y_coords)),
                     )
 
-            logger.info(f"Detected {len(regions)} text regions in image")
+                    if text.strip() and confidence > self.OCR_CONFIDENCE_THRESHOLD:
+                        regions.append(
+                            TextRegion(
+                                bbox=bbox,
+                                text=text.strip(),
+                                confidence=confidence,
+                                angle=angle,
+                            )
+                        )
+                except Exception as e:
+                    logger.debug(f"Failed to process OCR result: {e}")
+
+            logger.info(f"Detected {len(regions)} text regions (before merging)")
+
+            # Merge nearby regions on the same line to keep formulas/text together
+            regions = self._merge_nearby_regions(regions)
+
+            logger.info(f"Final {len(regions)} text regions after merging")
             return regions
 
         except Exception as e:
@@ -234,7 +460,19 @@ class VisionEngine:
                         angle=region.angle,
                     )
                 except Exception:
-                    font = ImageFont.load_default()
+                    default_font: Any = ImageFont.load_default()
+                    font = default_font
+
+                # Check font type for mypy/type-safety in older Pillow versions
+                if not isinstance(font, ImageFont.FreeTypeFont):
+                    # Fallback to a concrete FreeTypeFont if possible,
+                    # though modern Pillow load_default() usually is one.
+                    try:
+                        from utils.text_utils import get_font_for_language
+
+                        font = get_font_for_language(lang, 12)
+                    except Exception:
+                        pass  # Keep the default
 
                 # Draw
                 try:
@@ -440,15 +678,17 @@ class VisionEngine:
             try:
                 coords = [int(int(c) / scale) for c in bbox]
                 if len(coords) == 4:
+                    # Cast to fixed size tuple for mypy/type-safety
+                    bbox_tuple = (coords[0], coords[1], coords[2], coords[3])
                     regions.append(
                         TextRegion(
-                            bbox=tuple(coords),
+                            bbox=bbox_tuple,
                             text="",
                             confidence=1.0,
                             translated_text=str(text),
                         )
                     )
-            except (ValueError, TypeError):
+            except (ValueError, TypeError, IndexError):
                 continue
 
         return regions

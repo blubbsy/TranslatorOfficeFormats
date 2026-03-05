@@ -7,6 +7,7 @@ import logging
 import tempfile
 import traceback
 import concurrent.futures
+import threading
 from pathlib import Path
 
 from .queue_manager import Job, JobStatus
@@ -43,6 +44,12 @@ def run_translation_job(job: Job):
 
     logger.info(f"Runner starting job {job.id}")
 
+    # Check for early cancellation
+    if job.cancel_requested:
+        job.status = JobStatus.CANCELLED
+        job.status_msg = "Cancelled before start"
+        return
+
     # Write uploaded bytes to a temp file
     suffix = Path(job.filename).suffix
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp_input:
@@ -52,6 +59,10 @@ def run_translation_job(job: Job):
     output_path: str | None = None
 
     try:
+        # Check cancellation before heavy operations
+        if job.cancel_requested:
+            raise RuntimeError("Job cancelled by user")
+
         # --- Services ---
         llm_client, vision_engine = get_shared_services()
 
@@ -62,6 +73,11 @@ def run_translation_job(job: Job):
 
             logger.warning("LLM unreachable on first attempt, retrying in 3 s...")
             time.sleep(3)
+
+            # Check cancellation during retry wait
+            if job.cancel_requested:
+                raise RuntimeError("Job cancelled during LLM connection check")
+
             connected = llm_client.check_connection()
         if not connected:
             raise ConnectionError(
@@ -93,6 +109,17 @@ def run_translation_job(job: Job):
         text_chunks = [c for c in chunks if c.content_type != ContentType.IMAGE]
         image_chunks = [c for c in chunks if c.content_type == ContentType.IMAGE]
 
+        # Check for cancellation before starting translation
+        if job.cancel_requested or job.pause_requested:
+            logger.info(f"Job {job.id} cancelled/paused before translation started")
+            if job.cancel_requested:
+                job.status = JobStatus.CANCELLED
+                job.status_msg = "Cancelled by user"
+            elif job.pause_requested:
+                job.status = JobStatus.PAUSED
+                job.status_msg = "Paused by user"
+            return
+
         # --- Restore already-translated chunks from a previous attempt ---
         processed_count = 0
         for chunk in chunks:
@@ -116,7 +143,19 @@ def run_translation_job(job: Job):
             todo_text = [c for c in text_chunks if c.id not in job.intermediate_results]
             target_lang = job.target_lang
 
+            from streamlit.runtime.scriptrunner import (
+                get_script_run_ctx,
+                add_script_run_ctx,
+            )
+
+            ctx = get_script_run_ctx()
+
             def translate_chunk(chunk):
+                # Check cancellation before starting expensive operation
+                if job.cancel_requested or job.pause_requested:
+                    return chunk.id, chunk.text, None  # Return original
+                if ctx is not None:
+                    add_script_run_ctx(threading.current_thread(), ctx)
                 try:
                     translated = service.translate_text(
                         chunk.text,
@@ -135,7 +174,9 @@ def run_translation_job(job: Job):
                     consecutive_errors = 0
 
                     for future in concurrent.futures.as_completed(future_to_chunk):
+                        # Check cancellation before processing result
                         if _should_stop(job, executor):
+                            logger.info("Stopping text translation - cancel requested")
                             return
 
                         processed_count += 1
@@ -173,7 +214,19 @@ def run_translation_job(job: Job):
             img_method = job.settings.get("image_translation_method", "ocr")
             target_lang = job.target_lang
 
+            from streamlit.runtime.scriptrunner import (
+                get_script_run_ctx,
+                add_script_run_ctx,
+            )
+
+            ctx = get_script_run_ctx()
+
             def process_image_chunk(chunk):
+                # Check cancellation before starting expensive operation
+                if job.cancel_requested or job.pause_requested:
+                    return chunk.id, chunk.image_data, None  # Return original
+                if ctx is not None:
+                    add_script_run_ctx(threading.current_thread(), ctx)
                 try:
                     if translate_images:
                         translated_image, _ = service.translate_image(
@@ -194,7 +247,9 @@ def run_translation_job(job: Job):
                     }
 
                     for future in concurrent.futures.as_completed(future_to_img):
+                        # Check cancellation before processing result
                         if _should_stop(job, executor):
+                            logger.info("Stopping image translation - cancel requested")
                             return
 
                         processed_count += 1
@@ -246,11 +301,13 @@ def run_translation_job(job: Job):
 def _should_stop(job: Job, executor: concurrent.futures.ThreadPoolExecutor) -> bool:
     """Check cancel / pause flags and shut down the executor if needed."""
     if job.cancel_requested:
+        logger.info("Shutting down executor - job cancelled")
         executor.shutdown(wait=False, cancel_futures=True)
         job.status = JobStatus.CANCELLED
         job.status_msg = "Cancelled by user"
         return True
     if job.pause_requested:
+        logger.info("Shutting down executor - job paused")
         executor.shutdown(wait=False, cancel_futures=True)
         job.status = JobStatus.PAUSED
         job.status_msg = "Paused by user"
