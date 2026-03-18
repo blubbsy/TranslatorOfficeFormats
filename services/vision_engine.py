@@ -121,7 +121,7 @@ def _normalise_ocr_languages(raw_codes: list[str]) -> tuple[list[str], bool]:
         ]
         was_restricted = len(original_non_en) > 0
 
-        if "en" in mapped_codes or "en" not in result:
+        if "en" not in result:
             result.append("en")
         return result, was_restricted
 
@@ -221,11 +221,11 @@ class VisionEngine:
                 return self._reader
             except Exception as e:
                 self._reader_init_failures += 1
-            remaining = self.MAX_READER_RETRIES - self._reader_init_failures
-            logger.warning(
-                f"EasyOCR could not be initialised: {e} "
-                f"({remaining} retries remaining)"
-            )
+                remaining = self.MAX_READER_RETRIES - self._reader_init_failures
+                logger.warning(
+                    f"EasyOCR could not be initialised: {e} "
+                    f"({remaining} retries remaining)"
+                )
             return None
 
     # ------------------------------------------------------------------
@@ -553,8 +553,14 @@ class VisionEngine:
         translate_image_func: Callable[[str], str],
         smart_colors: bool = True,
         target_language: Optional[str] = None,
+        translate_func: Optional[Callable[[str], str]] = None,
     ) -> Tuple[bytes, List[TextRegion]]:
-        """VLM pipeline with automatic resizing for API compatibility."""
+        """VLM pipeline with automatic resizing for API compatibility.
+
+        *translate_func* is the text-translation callable used when the VLM
+        fails and the pipeline falls back to OCR.  If omitted, the OCR
+        fallback will overlay detected text without translating it.
+        """
         try:
             # 1. Load and optionally resize
             image = Image.open(io.BytesIO(image_data)).convert("RGB")
@@ -583,7 +589,7 @@ class VisionEngine:
             if not regions:
                 logger.info("VLM returned no regions, falling back to OCR")
                 return self._vlm_fallback_to_ocr(
-                    image_data, smart_colors, target_language
+                    image_data, smart_colors, target_language, translate_func
                 )
 
             logger.info(f"VLM returned {len(regions)} regions")
@@ -597,22 +603,28 @@ class VisionEngine:
         except Exception as e:
             logger.error(f"VLM processing failed: {e}")
             logger.info("Falling back to OCR pipeline")
-            return self._vlm_fallback_to_ocr(image_data, smart_colors, target_language)
+            return self._vlm_fallback_to_ocr(
+                image_data, smart_colors, target_language, translate_func
+            )
 
     def _vlm_fallback_to_ocr(
         self,
         image_data: bytes,
         smart_colors: bool,
         target_language: Optional[str],
+        translate_func: Optional[Callable[[str], str]] = None,
     ) -> Tuple[bytes, List[TextRegion]]:
         """When VLM fails, try OCR as a fallback. Return original on total failure."""
         try:
             if self.reader is not None:
-                # We need a translate_func; just return original text (no LLM here)
+                if translate_func is not None:
+                    # Full OCR+translate pipeline
+                    return self.process_image(
+                        image_data, translate_func, smart_colors, target_language
+                    )
+                # No translate_func available: detect text and overlay as-is
                 regions = self.detect_text(image_data)
                 if regions:
-                    # Mark each region with its original text as "translated" text
-                    # (the text won't actually be translated, but at least detection works)
                     for r in regions:
                         r.translated_text = r.text
                     result = self.create_overlay(

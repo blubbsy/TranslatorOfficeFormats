@@ -54,6 +54,7 @@ class BaseFileProcessor(ABC):
         self._file_path: Optional[Path] = None
         self._chunks_cache: dict[str, ContentChunk] = {}
         self.target_language: str = "English"
+        self.preserve_formatting: bool = False
 
     def get_special_font(self) -> Optional[str]:
         """Get a suitable font name for the target language."""

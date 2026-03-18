@@ -12,7 +12,6 @@ from docx.opc.exceptions import PackageNotFoundError
 from docx.text.paragraph import Paragraph
 
 from .base import BaseFileProcessor, ContentChunk, ContentType
-from settings import settings
 
 logger = logging.getLogger("OfficeTranslator.DocxProcessor")
 
@@ -150,7 +149,7 @@ class DocxProcessor(BaseFileProcessor):
         if paragraph is None:
             return
 
-        if settings.preserve_formatting and self._paragraph_has_formatting(paragraph):
+        if self.preserve_formatting and self._paragraph_has_formatting(paragraph):
             self._apply_with_formatting(paragraph, str(translated_content))
         else:
             # Simple replacement - clears formatting but is reliable

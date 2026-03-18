@@ -71,7 +71,7 @@ class XlsxProcessor(BaseFileProcessor):
                 for col_idx, cell in enumerate(row, start=1):
                     if cell.value and isinstance(cell.value, str):
                         cell_text = str(cell.value).strip()
-                        if cell_text:
+                        if cell_text and not cell_text.startswith("="):
                             chunk_id = f"{sheet_name}_{cell.coordinate}"
                             self._cell_map[chunk_id] = cell
 
@@ -85,7 +85,6 @@ class XlsxProcessor(BaseFileProcessor):
                                     "row": row_idx,
                                     "col": col_idx,
                                     "coordinate": cell.coordinate,
-                                    "has_formula": cell_text.startswith("="),
                                 },
                             )
                             chunk_count += 1

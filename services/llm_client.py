@@ -166,9 +166,17 @@ class LLMClient:
 
         logger.debug(f"Translating: {text[:50]}...")
 
-        # Token budget
-        estimated_input_tokens = (len(text) // 3) + 250
+        # Token budget: estimate from actual prompt content so that a large
+        # context string embedded in the system prompt is properly accounted
+        # for.  Using (len(text) // 3) + 250 was wrong when context was
+        # present because the constant 250 did not scale with the context
+        # appended to the system prompt, causing max_tokens to exceed the
+        # remaining window and triggering InternalServerError retries.
+        estimated_input_tokens = (len(system_prompt) + len(user_prompt)) // 3
         available_for_output = max(100, self.context_window - estimated_input_tokens)
+        # Output upper bound uses token estimate (chars // 3 * 2), not raw
+        # character count, to keep units consistent.
+        max_output_tokens = min(available_for_output, max(len(text) // 3 * 2, 200))
 
         try:
             response = self.client.chat.completions.create(
@@ -178,7 +186,7 @@ class LLMClient:
                     {"role": "user", "content": user_prompt},
                 ],
                 temperature=0.3,
-                max_tokens=min(available_for_output, max(len(text) * 2, 200)),
+                max_tokens=max_output_tokens,
             )
 
             # Defensive: handle missing/empty response
@@ -342,7 +350,12 @@ class LLMClient:
             context = None
             if window_size > 0 and i > 0:
                 start = max(0, i - window_size)
-                context = " ".join(translations[start:i])
+                context_str = " ".join(translations[start:i])
+                # Cap context to 20 % of the context window to avoid overflow
+                max_context_chars = int(self.context_window * 0.2 * 3)
+                if len(context_str) > max_context_chars:
+                    context_str = "..." + context_str[-max_context_chars:]
+                context = context_str
 
             try:
                 translated = self.translate(text, target_language, context)

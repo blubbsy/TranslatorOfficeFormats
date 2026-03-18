@@ -10,26 +10,34 @@ import concurrent.futures
 import threading
 from pathlib import Path
 
+
 from .queue_manager import Job, JobStatus
 from .translation_service import TranslationService
 from .llm_client import LLMClient
 from .vision_engine import VisionEngine
 from processors import get_processor, ContentType
+from settings import settings
 
 logger = logging.getLogger("OfficeTranslator.JobRunner")
 
 # Global instances for reuse (keeps connections / models alive)
 _LLM_CLIENT = None
 _VISION_ENGINE = None
+_services_lock = threading.Lock()
 
 
 def get_shared_services():
     """Return (or create) shared LLMClient and VisionEngine singletons."""
     global _LLM_CLIENT, _VISION_ENGINE
-    if _LLM_CLIENT is None:
-        _LLM_CLIENT = LLMClient()
-    if _VISION_ENGINE is None:
-        _VISION_ENGINE = VisionEngine()
+    # Fast path: both already initialised – no lock needed (immutable after set)
+    if _LLM_CLIENT is not None and _VISION_ENGINE is not None:
+        return _LLM_CLIENT, _VISION_ENGINE
+    with _services_lock:
+        # Re-check inside the lock to avoid double initialisation
+        if _LLM_CLIENT is None:
+            _LLM_CLIENT = LLMClient()
+        if _VISION_ENGINE is None:
+            _VISION_ENGINE = VisionEngine()
     return _LLM_CLIENT, _VISION_ENGINE
 
 
@@ -90,6 +98,9 @@ def run_translation_job(job: Job):
         # --- Processor ---
         processor = get_processor(input_path)
         processor.target_language = job.target_lang
+        processor.preserve_formatting = job.settings.get(
+            "preserve_formatting", settings.preserve_formatting
+        )
         processor.load(input_path)
 
         # --- Extract content ---
@@ -142,6 +153,9 @@ def run_translation_job(job: Job):
         if text_chunks:
             todo_text = [c for c in text_chunks if c.id not in job.intermediate_results]
             target_lang = job.target_lang
+            preserve_fmt = job.settings.get(
+                "preserve_formatting", settings.preserve_formatting
+            )
 
             from streamlit.runtime.scriptrunner import (
                 get_script_run_ctx,
@@ -161,6 +175,7 @@ def run_translation_job(job: Job):
                         chunk.text,
                         target_language=target_lang,
                         use_context=False,
+                        preserve_formatting=preserve_fmt,
                     )
                     return chunk.id, translated, None
                 except Exception as e:

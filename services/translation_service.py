@@ -65,6 +65,7 @@ class TranslationService:
         text: str,
         use_context: bool = True,
         target_language: Optional[str] = None,
+        preserve_formatting: Optional[bool] = None,
     ) -> str:
         """Translate a single text string. Splits large texts automatically."""
         if not text or not text.strip():
@@ -83,7 +84,10 @@ class TranslationService:
                 )
                 translated_chunks.append(
                     self.translate_text(
-                        chunk, use_context=use_context, target_language=target_language
+                        chunk,
+                        use_context=use_context,
+                        target_language=target_language,
+                        preserve_formatting=preserve_formatting,
                     )
                 )
 
@@ -99,11 +103,16 @@ class TranslationService:
                 context_str = "..." + context_str[-max_chars:]
             context = context_str
 
+        eff_preserve_formatting = (
+            preserve_formatting
+            if preserve_formatting is not None
+            else settings.preserve_formatting
+        )
         translated = self.llm_client.translate(
             text,
             target_language=target_language,
             context=context,
-            preserve_formatting=settings.preserve_formatting,
+            preserve_formatting=eff_preserve_formatting,
         )
 
         if use_context:
@@ -161,6 +170,9 @@ class TranslationService:
                     ),
                     smart_colors=smart_colors,
                     target_language=target_language,
+                    translate_func=lambda t: self.translate_text(
+                        t, use_context=False, target_language=target_language
+                    ),
                 )
             except Exception as e:
                 logger.warning(

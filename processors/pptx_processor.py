@@ -12,7 +12,6 @@ from pptx.shapes.group import GroupShape
 from pptx.shapes.picture import Picture
 
 from .base import BaseFileProcessor, ContentChunk, ContentType
-from settings import settings
 
 logger = logging.getLogger("OfficeTranslator.PptxProcessor")
 
@@ -193,7 +192,7 @@ class PptxProcessor(BaseFileProcessor):
 
         slide_idx, paragraph = self._shape_map[chunk_id]
 
-        if settings.preserve_formatting and self._paragraph_has_formatting(paragraph):
+        if self.preserve_formatting and self._paragraph_has_formatting(paragraph):
             self._apply_with_formatting(paragraph, str(translated_content))
         else:
             # Simple replacement
