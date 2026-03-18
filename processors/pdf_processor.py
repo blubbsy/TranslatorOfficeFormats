@@ -261,6 +261,7 @@ class PdfProcessor(BaseFileProcessor):
             "rect": img_rect,
             "type": "image",
             "xref": xref,
+            "original_image": img_data,
         }
 
         return ContentChunk(
@@ -308,6 +309,7 @@ class PdfProcessor(BaseFileProcessor):
             "rect": fitz.Rect(block["bbox"]),
             "type": "image",
             "xref": xref if xref and xref > 0 else 0,
+            "original_image": img_data,
         }
 
         return ContentChunk(
@@ -320,29 +322,33 @@ class PdfProcessor(BaseFileProcessor):
 
     @staticmethod
     def _ensure_valid_image(data: bytes) -> bytes | None:
-        """Validate image bytes and convert to PNG if needed.
-
-        Returns PNG bytes on success, None on failure.
-        Upscales tiny images so OCR has a better chance.
+        """Validate image bytes and return them.
+        
+        If the image is valid, we return the original bytes to preserve 
+        quality and size. Only if the original is somehow broken or 
+        unsupported do we try to re-encode it.
         """
         try:
-            img: Any = Image.open(io.BytesIO(data))
+            # Check if it's already a valid image format that PIL can handle
+            img = Image.open(io.BytesIO(data))
             img.verify()  # verify integrity
-            # Re-open (verify consumes the file)
-            img = Image.open(io.BytesIO(data)).convert("RGB")
-
-            # Upscale very small images for OCR
-            MIN_DIM = 150
-            w, h = img.size
-            if w < MIN_DIM or h < MIN_DIM:
-                scale = max(MIN_DIM / w, MIN_DIM / h, 1.0)
-                new_size = (int(w * scale), int(h * scale))
-                img = img.resize(new_size, Image.Resampling.LANCZOS)
-
+            
+            # Re-open for further checks
+            img = Image.open(io.BytesIO(data))
+            
+            # We used to upscale here, but that's now handled by the 
+            # VisionEngine specifically for OCR. Here we keep original.
+            
+            # If it's a common format (JPEG, PNG, GIF), keep original bytes
+            if img.format in ["JPEG", "PNG", "GIF", "BMP"]:
+                return data
+                
+            # Otherwise, convert to a standard format (PNG)
             buf = io.BytesIO()
-            img.save(buf, format="PNG")
+            img.convert("RGB").save(buf, format="PNG")
             return buf.getvalue()
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Image validation failed: {e}")
             return None
 
     # ------------------------------------------------------------------
@@ -376,6 +382,10 @@ class PdfProcessor(BaseFileProcessor):
 
         if block_info.get("type") == "image":
             if isinstance(translated_content, bytes):
+                # Skip if image is identical to original to prevent bloat
+                if translated_content == block_info.get("original_image"):
+                    logger.debug(f"Skipping identical image for {chunk_id}")
+                    return
                 block_info["translated_image"] = translated_content
         else:
             block_info["translated_text"] = str(translated_content)
@@ -412,10 +422,15 @@ class PdfProcessor(BaseFileProcessor):
             page = self._document[page_idx]
             items = pages_blocks[page_idx]
 
-            # --- Phase 1: redact original content for image overlays ---
-            image_items = [(cid, bi) for cid, bi in items if bi.get("translated_image")]
-            if image_items:
-                for _cid, bi in image_items:
+            # --- Phase 1: redact original content for NON-xref image overlays ---
+            # Xref-based images will be replaced directly via replace_image (no redaction needed)
+            fallback_image_items = [
+                (cid, bi) for cid, bi in items 
+                if bi.get("translated_image") and not bi.get("xref")
+            ]
+            
+            if fallback_image_items:
+                for _cid, bi in fallback_image_items:
                     try:
                         page.add_redact_annot(bi["rect"])
                     except Exception as e:
@@ -428,7 +443,7 @@ class PdfProcessor(BaseFileProcessor):
                         f"falling back to draw_rect: {e}"
                     )
                     # Fallback: cover with background colour
-                    for _cid, bi in image_items:
+                    for _cid, bi in fallback_image_items:
                         bg = self._sample_background(page, bi["rect"])
                         page.draw_rect(bi["rect"], color=bg, fill=bg)
 
@@ -437,8 +452,9 @@ class PdfProcessor(BaseFileProcessor):
             for _cid, bi in text_items:
                 self._apply_text_overlay(bi)
 
-            # --- Phase 3: insert translated images ---
-            for _cid, bi in image_items:
+            # --- Phase 3: insert/replace images ---
+            all_image_items = [(cid, bi) for cid, bi in items if bi.get("translated_image")]
+            for _cid, bi in all_image_items:
                 self._apply_image_overlay(bi)
 
         path = Path(output_path)
@@ -551,15 +567,28 @@ class PdfProcessor(BaseFileProcessor):
             logger.error(f"Failed to apply text overlay: {e}")
 
     def _apply_image_overlay(self, block_info: dict) -> None:
-        """Insert the translated image into the (already redacted) area."""
+        """Insert or replace the translated image."""
         try:
             page = self._document[block_info["page_idx"]]
             rect = block_info["rect"]
             image_data = block_info.get("translated_image")
+            xref = block_info.get("xref")
+            
             if not image_data:
                 return
 
+            if xref and xref > 0:
+                # Direct replacement by xref - most efficient and preserves layout
+                try:
+                    self._document.replace_image(xref, stream=image_data)
+                    return
+                except Exception as e:
+                    logger.warning(f"replace_image failed for xref {xref}: {e}")
+                    # fall back to insert_image
+
+            # Fallback for non-xref images or failed replace_image
             page.insert_image(rect, stream=image_data)
+            
         except Exception as e:
             logger.error(f"Failed to insert translated image overlay: {e}")
 

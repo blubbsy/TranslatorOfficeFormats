@@ -334,6 +334,7 @@ class VisionEngine:
 
             # Upscale small images for better OCR accuracy
             w, h = image.size
+            scale = 1.0
             if w < self.MIN_OCR_DIM or h < self.MIN_OCR_DIM:
                 scale = max(self.MIN_OCR_DIM / w, self.MIN_OCR_DIM / h, 1.0)
                 new_size = (int(w * scale), int(h * scale))
@@ -372,11 +373,12 @@ class VisionEngine:
                         logger.debug(f"Unexpected result format: {result}")
                         continue
 
-                    x_coords = [p[0] for p in bbox_points]
-                    y_coords = [p[1] for p in bbox_points]
+                    # Scale coordinates back down to original image size
+                    x_coords = [p[0] / scale for p in bbox_points]
+                    y_coords = [p[1] / scale for p in bbox_points]
 
-                    dx = bbox_points[1][0] - bbox_points[0][0]
-                    dy = bbox_points[1][1] - bbox_points[0][1]
+                    dx = (bbox_points[1][0] - bbox_points[0][0]) / scale
+                    dy = (bbox_points[1][1] - bbox_points[0][1]) / scale
                     angle = -math.degrees(math.atan2(dy, dx))
 
                     bbox = (
@@ -498,7 +500,20 @@ class VisionEngine:
                     )
 
             output = io.BytesIO()
-            image.save(output, format="PNG")
+            
+            # Optimization: Use JPEG for large images without alpha to reduce file size.
+            # PNG is preserved for small images or if transparency is needed.
+            is_large = image.width * image.height > 500_000 # > 0.5 MP
+            
+            if is_large:
+                # Check if we can safely use JPEG (RGB)
+                rgb_image = image.convert("RGB")
+                # If the image was originally RGBA, we might lose something, 
+                # but for OCR overlays, it's usually fine.
+                rgb_image.save(output, format="JPEG", quality=85, optimize=True)
+            else:
+                image.save(output, format="PNG", optimize=True)
+                
             output.seek(0)
 
             logger.info(

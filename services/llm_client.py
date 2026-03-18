@@ -199,6 +199,10 @@ class LLMClient:
                 logger.warning("LLM returned None content")
                 return text
 
+            # Strip <think> tags if present (common in reasoning models)
+            import re
+            content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL)
+
             translated = content.strip()
             logger.debug(f"Translated to: {translated[:50]}...")
             return translated
