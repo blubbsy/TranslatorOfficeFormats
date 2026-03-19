@@ -49,6 +49,9 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "btn_pause": "Pause",
         "btn_resume": "Resume",
         "ocr_restriction_warn": "Note: EasyOCR combined restricted scripts (Chinese/Japanese/Korean/Thai/Hindi) only with English. Other OCR source languages were removed for compatibility.",
+        "backend_title": "Translation Backend",
+        "backend_argos": "Argos Translate (Offline, Fast)",
+        "backend_llm": "LLM Provider (High Quality)",
     },
     "de": {
         "title": "OfficeTranslator",
@@ -88,6 +91,9 @@ TRANSLATIONS: Dict[str, Dict[str, str]] = {
         "btn_pause": "Pause",
         "btn_resume": "Fortsetzen",
         "ocr_restriction_warn": "Hinweis: EasyOCR erlaubt eingeschränkte Schriften (Chinesisch/Japanisch/Koreanisch/Thai/Hindi) nur in Kombination mit Englisch. Andere OCR-Quellsprachen wurden zur Kompatibilität entfernt.",
+        "backend_title": "Übersetzungs-Backend",
+        "backend_argos": "Argos Translate (Offline, Schnell)",
+        "backend_llm": "LLM Provider (Hohe Qualität)",
     },
 }
 

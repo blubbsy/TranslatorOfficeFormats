@@ -23,9 +23,11 @@ class TranslationService:
         self,
         provider: Optional[BaseTranslationProvider] = None,
         vision_engine: Optional[VisionEngine] = None,
+        backend: Optional[str] = None,
     ):
         self._provider: Optional[BaseTranslationProvider] = provider
         self._vision_engine: Optional[VisionEngine] = vision_engine
+        self._backend_override: Optional[str] = backend
         self._context_buffer: list[str] = []
 
         self.on_progress: Optional[Callable[[int, int, str], None]] = None
@@ -34,7 +36,8 @@ class TranslationService:
     def provider(self) -> BaseTranslationProvider:
         """Lazy-load the selected translation provider."""
         if self._provider is None:
-            if settings.translation_backend.lower() == "argos":
+            backend_type = self._backend_override or settings.translation_backend
+            if backend_type.lower() == "argos":
                 logger.info("Initializing Argos Translate backend")
                 self._provider = ArgosProvider()
             else:

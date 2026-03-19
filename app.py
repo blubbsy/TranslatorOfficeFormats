@@ -73,12 +73,12 @@ def get_queue_manager() -> GlobalQueueManager:
     return manager
 
 
-def check_llm_connection_async():
+def check_llm_connection_async(backend: Optional[str] = None):
     """Run connection check in background."""
     try:
         from services import TranslationService
 
-        service = TranslationService()
+        service = TranslationService(backend=backend)
         is_ready, msg = service.check_ready()
 
         st.session_state.llm_status = "ready" if is_ready else "error"
@@ -112,13 +112,20 @@ def init_session():
 
 
 @st.fragment(run_every=5)
-def render_connection_status():
+def render_connection_status(backend: Optional[str] = None):
     """Render connection status in sidebar."""
+    # If the backend changed since the last check, reset status
+    if "last_checked_backend" not in st.session_state or st.session_state.last_checked_backend != backend:
+        st.session_state.llm_status = "checking"
+        st.session_state.last_checked_backend = backend
+        if "check_thread_started" in st.session_state:
+            del st.session_state.check_thread_started
+
     if st.session_state.llm_status == "checking":
         st.info(f"🔄 {t('status_connecting')}")
         if "check_thread_started" not in st.session_state:
             st.session_state.check_thread_started = True
-            thread = threading.Thread(target=check_llm_connection_async)
+            thread = threading.Thread(target=check_llm_connection_async, args=(backend,))
             add_script_run_ctx(thread)
             thread.daemon = True
             thread.start()
@@ -165,8 +172,26 @@ def render_sidebar():
 
         st.divider()
 
+        # Backend Selection
+        st.subheader(t("backend_title"))
+        backend_options = [t("backend_argos"), t("backend_llm")]
+        backend_mapping = {t("backend_argos"): "argos", t("backend_llm"): "llm"}
+        
+        current_backend = settings.translation_backend
+        backend_default_index = 1 if current_backend == "llm" else 0
+        
+        selected_backend_label = st.radio(
+            t("backend_title"),
+            options=backend_options,
+            index=backend_default_index,
+            label_visibility="collapsed"
+        )
+        selected_backend = backend_mapping[selected_backend_label]
+
+        st.divider()
+
         # Connection status fragment
-        render_connection_status()
+        render_connection_status(backend=selected_backend)
 
         st.title(f"⚙️ {t('settings_title')}")
 
