@@ -4,9 +4,11 @@ python-dotenv>=1.0.0
 pydantic>=2.0.0
 pydantic-settings>=2.0.0
 
-# LLM Integration
+# Translation Backends
 openai>=1.0.0
 tenacity>=8.2.0
+argostranslate>=1.9.0
+langdetect>=1.0.9
 
 # Document Processing
 python-docx>=1.1.0

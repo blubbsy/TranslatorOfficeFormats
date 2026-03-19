@@ -21,6 +21,12 @@ class Settings(BaseSettings):
         extra="ignore",
     )
     
+    # Backend selection
+    translation_backend: str = Field(
+        default="argos",
+        description="Translation backend to use: 'argos' (fast, offline) or 'llm' (high quality, context-aware)"
+    )
+
     # LLM Connection
     llm_base_url: str = Field(
         default="http://localhost:1234/v1",
@@ -85,6 +91,15 @@ class Settings(BaseSettings):
         description="Maximum retry attempts for LLM calls"
     )
     
+    @field_validator("translation_backend")
+    @classmethod
+    def validate_backend(cls, v: str) -> str:
+        valid_backends = {"argos", "llm"}
+        lower_v = v.lower()
+        if lower_v not in valid_backends:
+            raise ValueError(f"translation_backend must be one of {valid_backends}")
+        return lower_v
+
     @field_validator("log_level")
     @classmethod
     def validate_log_level(cls, v: str) -> str:

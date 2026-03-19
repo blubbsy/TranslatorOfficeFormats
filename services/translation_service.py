@@ -1,11 +1,11 @@
 """
-High-level translation service orchestrating LLM and vision processing.
+High-level translation service orchestrating LLM/Argos and vision processing.
 """
 
 import logging
 from typing import Callable, Generator, Optional
 
-from .llm_client import LLMClient
+from .providers import BaseTranslationProvider, LLMProvider, ArgosProvider
 from .vision_engine import VisionEngine, TextRegion
 from settings import settings
 from utils.text_utils import split_text_smart
@@ -15,27 +15,32 @@ logger = logging.getLogger("OfficeTranslator.TranslationService")
 
 class TranslationService:
     """
-    High-level translation service that coordinates LLM and vision components.
-    Provides progress callbacks for UI integration.
+    High-level translation service that coordinates the translation provider
+    and vision components. Provides progress callbacks for UI integration.
     """
 
     def __init__(
         self,
-        llm_client: Optional[LLMClient] = None,
+        provider: Optional[BaseTranslationProvider] = None,
         vision_engine: Optional[VisionEngine] = None,
     ):
-        self._llm_client: Optional[LLMClient] = llm_client
+        self._provider: Optional[BaseTranslationProvider] = provider
         self._vision_engine: Optional[VisionEngine] = vision_engine
         self._context_buffer: list[str] = []
 
         self.on_progress: Optional[Callable[[int, int, str], None]] = None
 
     @property
-    def llm_client(self) -> LLMClient:
-        """Lazy-load LLM client."""
-        if self._llm_client is None:
-            self._llm_client = LLMClient()
-        return self._llm_client
+    def provider(self) -> BaseTranslationProvider:
+        """Lazy-load the selected translation provider."""
+        if self._provider is None:
+            if settings.translation_backend.lower() == "argos":
+                logger.info("Initializing Argos Translate backend")
+                self._provider = ArgosProvider()
+            else:
+                logger.info("Initializing LLM backend")
+                self._provider = LLMProvider()
+        return self._provider
 
     @property
     def vision_engine(self) -> VisionEngine:
@@ -45,14 +50,9 @@ class TranslationService:
         return self._vision_engine
 
     def check_ready(self) -> tuple[bool, str]:
-        """Check if the service is ready (LLM connected)."""
+        """Check if the service is ready (backend connected)."""
         try:
-            if self.llm_client.check_connection():
-                model = self.llm_client.connected_model_id or settings.llm_model
-                ctx = self.llm_client.context_window
-                return True, f"🟢 Ready: {model} ({ctx})"
-            else:
-                return False, "🔴 LLM Disconnected"
+            return self.provider.check_connection()
         except Exception as e:
             return False, f"🔴 Error: {str(e)}"
 
@@ -71,7 +71,12 @@ class TranslationService:
         if not text or not text.strip():
             return text
 
-        safe_input_limit_chars = int((self.llm_client.context_window * 0.4) * 3)
+        # Simple context size estimation to prevent huge chunks, 
+        # though Argos doesn't care much, LLM does.
+        safe_input_limit_chars = 4000 
+        
+        if hasattr(self.provider, "client") and hasattr(self.provider.client, "context_window"):
+            safe_input_limit_chars = int((self.provider.client.context_window * 0.4) * 3)
 
         if len(text) > safe_input_limit_chars:
             logger.info(f"Text too large ({len(text)} chars), splitting into chunks...")
@@ -94,11 +99,16 @@ class TranslationService:
             return "\n\n".join(translated_chunks)
 
         context = None
-        if use_context and self._context_buffer:
+        # Only LLM Provider realistically uses context
+        if use_context and self._context_buffer and isinstance(self.provider, LLMProvider):
             context_str = " ".join(
                 self._context_buffer[-settings.context_window_size :]
             )
-            max_chars = int((self.llm_client.context_window * 0.2) * 3)
+            # Cap context to prevent bloat
+            max_chars = 3000
+            if hasattr(self.provider, "client") and hasattr(self.provider.client, "context_window"):
+                 max_chars = int((self.provider.client.context_window * 0.2) * 3)
+                 
             if len(context_str) > max_chars:
                 context_str = "..." + context_str[-max_chars:]
             context = context_str
@@ -108,14 +118,15 @@ class TranslationService:
             if preserve_formatting is not None
             else settings.preserve_formatting
         )
-        translated = self.llm_client.translate(
+        
+        translated = self.provider.translate(
             text,
-            target_language=target_language,
+            target_language=target_language or settings.target_language,
             context=context,
             preserve_formatting=eff_preserve_formatting,
         )
 
-        if use_context:
+        if use_context and isinstance(self.provider, LLMProvider):
             self._context_buffer.append(translated)
             if len(self._context_buffer) > settings.context_window_size * 2:
                 self._context_buffer = self._context_buffer[
@@ -165,8 +176,8 @@ class TranslationService:
                 logger.info("Using experimental VLM image translation")
                 return self.vision_engine.process_image_vlm(
                     image_data,
-                    translate_image_func=lambda b64: self.llm_client.translate_image(
-                        b64, target_language=target_language
+                    translate_image_func=lambda b64: self.provider.translate_image(
+                        b64, target_language=target_language or settings.target_language
                     ),
                     smart_colors=smart_colors,
                     target_language=target_language,
@@ -174,6 +185,8 @@ class TranslationService:
                         t, use_context=False, target_language=target_language
                     ),
                 )
+            except NotImplementedError:
+                 logger.warning("VLM image translation not supported by current backend, falling back to OCR")
             except Exception as e:
                 logger.warning(
                     f"VLM image translation failed ({e}), falling back to OCR"

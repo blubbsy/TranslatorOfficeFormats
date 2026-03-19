@@ -405,6 +405,61 @@ def split_text_smart(text: str, max_chars: int) -> list[str]:
     return chunks
 
 
+def get_iso_639_1(language: str) -> str:
+    """
+    Map a language name or long code to ISO-639-1.
+    """
+    lang_lower = language.lower().strip()
+    
+    # Direct mappings
+    mapping = {
+        "english": "en",
+        "en": "en",
+        "german": "de",
+        "de": "de",
+        "french": "fr",
+        "fr": "fr",
+        "spanish": "es",
+        "es": "es",
+        "italian": "it",
+        "it": "it",
+        "portuguese": "pt",
+        "pt": "pt",
+        "russian": "ru",
+        "ru": "ru",
+        "chinese": "zh",
+        "zh": "zh",
+        "chinese (simplified)": "zh",
+        "chinese (traditional)": "zh",
+        "japanese": "ja",
+        "ja": "ja",
+        "korean": "ko",
+        "ko": "ko",
+        "arabic": "ar",
+        "ar": "ar",
+        "turkish": "tr",
+        "tr": "tr",
+        "vietnamese": "vi",
+        "vi": "vi",
+        "thai": "th",
+        "th": "th",
+        "hindi": "hi",
+        "hi": "hi",
+        "dutch": "nl",
+        "nl": "nl",
+        "polish": "pl",
+        "pl": "pl",
+    }
+    
+    # Handle codes like 'en-US' or 'zh-CN'
+    if "-" in lang_lower:
+        base = lang_lower.split("-")[0]
+        if base in mapping:
+            return mapping[base]
+            
+    return mapping.get(lang_lower, lang_lower[:2])
+
+
 def format_size(size_bytes: int) -> str:
     """Format bytes into a human-readable string (KB, MB)."""
     if size_bytes < 1024:
